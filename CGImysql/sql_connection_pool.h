@@ -40,7 +40,7 @@ private:
 
 private:
 	string m_url;
-	string m_port;
+	int m_port;
 	string m_user;
 	string m_password;
 	string m_dbname;
