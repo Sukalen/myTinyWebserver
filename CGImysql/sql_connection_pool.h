@@ -10,6 +10,7 @@
 #include<string>
 
 #include "../lock/locker.h"
+#include "../log/log.h"
 
 using std::string;
 using std::list;

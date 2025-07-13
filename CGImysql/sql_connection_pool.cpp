@@ -46,12 +46,14 @@ void connection_pool::init(string url,string user,string password,string dbname,
 		if(NULL == con)
 		{
 			LOG_ERROR("Mysql error:%s",mysql_error(con));
+			Log::get_instance()->flush();
 			exit(1);
 		}
 		con = mysql_real_connect(con,m_url.c_str(),m_user.c_str(),m_password.c_str(),m_dbname.c_str(),m_port,NULL,0);
 		if(NULL == con)
 		{
 			LOG_ERROR("Mysql error:%s",mysql_error(con));
+			Log::get_instance()->flush();
 			exit(1);
 		}
 		m_connlist.push_back(con);
