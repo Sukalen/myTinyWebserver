@@ -22,7 +22,7 @@ public:
 
 public:
 	time_t expire;
-	void (*cbfunc)(client_data*);
+	void (*cb_func)(client_data*);
 	client_data* user_data;
 	util_timer* prev;
 	util_timer* next;
@@ -139,7 +139,7 @@ public:
 			{
 				break;
 			}
-			tmp->cbfunc(tmp->user_data);
+			tmp->cb_func(tmp->user_data);
 			head = tmp->next;
 			if(head)
 			{
