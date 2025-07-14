@@ -20,16 +20,13 @@
 #define TIMESLOT 5
 #define TIMESLOT_TIMES 12
 
-#define ASYNLOG
-//#define SYNLOG
+//#define ASYNLOG
+#define SYNLOG
 
-#ifndef listenfdET
+
 #define listenfdET
-#endif
 
-//#ifndef listenfdLT
 //#define listenfdLT
-//#endif
 
 extern int addfd(int epollfd,int fd,bool is_et,bool one_shot);
 extern int removefd(int epollfd,int fd);
@@ -106,7 +103,7 @@ int main(int argc, char** argv)
     if (argc <= 1)
     {
         printf("usage: %s port_number\n", basename(argv[0]));
-        return 1;
+        exit(1);
     }
 
     int port = atoi(argv[1]);
@@ -114,7 +111,8 @@ int main(int argc, char** argv)
     addsig(SIGPIPE, SIG_IGN);
 
     connection_pool* connpool = connection_pool::get_instance();
-    connpool->init("localhost", "root", "root", "websrvdb", 3306, 8);
+    //connpool->init("localhost", "root", "root", "websrvdb", 3306, 8);
+	connpool->init("localhost", "webuser", "Web@123456!", "websrvdb", 3306, 8);
 
     threadpool<http_conn>* pool = NULL;
     try
@@ -177,11 +175,11 @@ int main(int argc, char** argv)
 		exit(1);
 	}
 
-#ifdef epollfdET
+#ifdef listenfdET
     addfd(epollfd, listenfd, true, false);
 #endif
 
-#ifdef epollfdLT
+#ifdef listenfdLT
 	addfd(epollfd,listenfd,false,false);
 #endif
 
