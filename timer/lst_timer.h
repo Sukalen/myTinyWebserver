@@ -114,7 +114,7 @@ public:
 
 		if(timer == tail)
 		{
-			tail = tail->next;
+			tail = tail->prev;
 			tail->next = NULL;
 			delete timer;
 			return;
