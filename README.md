@@ -11,3 +11,35 @@
 
 6.实现http协议解析
 
+# 出bug调试步骤
+**1.打开 core dump 调试**
+
+```bash
+  ulimit -c unlimited   # 开启 core dump 文件生成
+  ./server 9006         # 再次运行 server
+```
+
+**2.用 webbench 压测，再次触发崩溃**
+```bash
+  ls core               # 确认是否生成了 core 文件
+  gdb ./server core     # 调用 gdb 调试
+```
+**3.进入 gdb 后输入：**
+```bash
+bt   # 打印调用栈（backtrace）
+```
+**4.如果没有core，是因为Linux 某些版本默认不生成 core 文件，或者生成在特定目录（比如 /var/core），可以手动设置core文件的生成方式：**
+
+先检查：
+```bash
+cat /proc/sys/kernel/core_pattern
+```
+如果输出的是 |/usr/share/apport/apport %p %s %c %P，说明 Ubuntu 的 Apport 系统接管了core文件，需要关闭它：
+```bash
+sudo systemctl stop apport.service
+sudo systemctl disable apport.service
+```
+然后运行下面命令，让core文件保存在当前目录，文件名为core：
+```bash
+sudo sysctl -w kernel.core_pattern=core
+```
