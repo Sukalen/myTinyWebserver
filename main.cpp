@@ -8,6 +8,9 @@
 #include<fcntl.h>
 #include<string.h>
 
+#include<memory>
+#include<vector>
+
 #include "./lock/locker.h"
 #include "./threadpool/threadpool.h"
 #include "./timer/lst_timer.h"
@@ -114,25 +117,20 @@ int main(int argc, char** argv)
     //connpool->init("localhost", "root", "root", "websrvdb", 3306, 8);
 	connpool->init("localhost", "webuser", "Web@123456!", "websrvdb", 3306, 8);
 
-    threadpool<http_conn>* pool = NULL;
+    std::unique_ptr<threadpool<http_conn>> pool;
     try
     {
-        pool = new threadpool<http_conn>(connpool);
+        pool = std::make_unique<threadpool<http_conn>>(connpool);
     }
-    catch (...)
+    catch (const std::exception& e)
     {
+        LOG_ERROR("create threadpool failed:%s", e.what());
         return 1;
     }
 
-    http_conn* users = new http_conn[MAX_FD];
-    if(NULL == users)
-	{
-		LOG_ERROR("users is NULL");
-		Log::get_instance()->flush();
-		exit(1);
-	}
-
-    users->initmysql_result(connpool);
+    std::vector<http_conn> users(MAX_FD);
+    
+    users[0].initmysql_result(connpool);
 
     int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if(listenfd < 0)
@@ -199,7 +197,7 @@ int main(int argc, char** argv)
     addsig(SIGTERM, sig_handler, false);
     bool stop_server = false;
 
-    client_data* users_timer = new client_data[MAX_FD];
+    std::vector<client_data> users_timer(MAX_FD);
 
     bool timeout = false;
     alarm(TIMESLOT);
@@ -330,7 +328,7 @@ int main(int argc, char** argv)
                     LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
                     Log::get_instance()->flush();
 
-                    pool->append(users + sockfd);
+                    pool->append(&users[sockfd]);
 
                     if (timer)
                     {
@@ -387,8 +385,5 @@ int main(int argc, char** argv)
     close(listenfd);
     close(pipefd[1]);
     close(pipefd[0]);
-    delete[] users;
-    delete[] users_timer;
-    delete pool;
     return 0;
 }
