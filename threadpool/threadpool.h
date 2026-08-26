@@ -3,13 +3,13 @@
 
 #include<list>
 #include<stdio.h>
-#include<exception>
-#include<pthread.h>
+#include<thread>
+#include<vector>
+#include<stdexcept>
 
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
 
-using std::list;
 
 
 template<typename T>
@@ -18,16 +18,21 @@ class threadpool
 public:
 	threadpool(connection_pool* connpool,int thread_number = 8,int max_requests = 10000);
 	~threadpool();
+    
+    threadpool(const threadpool&) = delete;
+    threadpool& operator=(const threadpool&) = delete;
+
 	bool append(T* request);
 
 private:
-	static void* worker(void* arg);
 	void run();
 private:
 	int m_thread_number;
 	int m_max_requests;
-	pthread_t* m_threads;
-	list<T*> m_workqueue;
+    
+    std::vector<std::thread> m_threads;
+
+	std::list<T*> m_workqueue;
 	locker m_mutex;
 	sem m_queuestat;
 	bool m_stop;
@@ -37,47 +42,79 @@ private:
 
 template<typename T>
 threadpool<T>::threadpool(connection_pool* connpool,int thread_number,int max_requests):
-	m_thread_number(thread_number),m_max_requests(max_requests),m_threads(NULL),m_stop(false),m_connpool(connpool)
+	m_thread_number(thread_number),m_max_requests(max_requests),m_stop(false),m_connpool(connpool)
 {
 	if(thread_number <= 0 || max_requests <= 0)
 	{
-		throw std::exception();
-	}
-	m_threads = new pthread_t[m_thread_number];
-
-	if(!m_threads)
-	{
-		throw std::exception();
+		throw std::invalid_argument("thread_number and max_requests must be positive");
 	}
 
-	for(int i = 0;i < m_thread_number;++i)
-	{
-		if(pthread_create(m_threads + i,NULL,worker,this) != 0)
-		{
-			delete[] m_threads;
-			throw std::exception();
-		}
+	m_threads.reserve(m_thread_number);
 
-		if(pthread_detach(m_threads[i]))
-		{
-			delete[] m_threads;
-			throw std::exception();
-		}
-	}
+    try
+    {
+        for(int i = 0; i < m_thread_number; ++i)
+        {
+            m_threads.emplace_back(
+                &threadpool<T>::run, this
+            );
+        }
+    }
+    catch(...)
+    {
+        m_mutex.lock();
+        m_stop = true;
+        m_mutex.unlock();
+        
+        for(std::size_t i=0; i < m_threads.size(); ++i)
+        {
+            m_queuestat.post();
+        }
+        
+        for(auto& thread:m_threads)
+        {
+            if(thread.joinable())
+            {
+                thread.join();
+            }
+        }
+        
+        throw;
+    }
+
 }
 
 template<typename T>
 threadpool<T>::~threadpool()
 {
-	delete[] m_threads;
+	m_mutex.lock();
 	m_stop = true;
+    m_mutex.unlock();
+
+    for(std::size_t i=0; i < m_threads.size(); ++i)
+    {
+        m_queuestat.post();
+    }
+
+    for(auto& thread:m_threads)
+    {
+        if(thread.joinable())
+        {
+            thread.join();
+        }
+    }
 }
 
 template<typename T>
 bool threadpool<T>::append(T* request)
 {
+    if(!request)
+    {
+        return false;
+    }
+
 	m_mutex.lock();
-	if(m_workqueue.size() > m_max_requests)
+	if(m_stop || m_workqueue.size() >= m_max_requests)
 	{
 		m_mutex.unlock();
 		return false;
@@ -88,36 +125,44 @@ bool threadpool<T>::append(T* request)
 	return true;
 }
 
-template<typename T>
-void* threadpool<T>::worker(void* arg)
-{
-	threadpool* pool = (threadpool*)arg;
-	pool->run();
-	return pool;
-}
 
 template<typename T>
 void threadpool<T>::run()
 {
-	while(!m_stop)
+	while(true)
 	{
-		m_queuestat.wait();
-		m_mutex.lock();
-		if(m_workqueue.empty())
-		{
-			m_mutex.unlock();
-			continue;
-		}
-		T* request = m_workqueue.front();
-		m_workqueue.pop_front();
-		m_mutex.unlock();
-		if(!request)
-		{
-			continue;
-		}
+	    if(!m_queuestat.wait())
+        {
+            continue;
+        }
+        m_mutex.lock();
 
-		connectionRAII mysqlcon(&request->m_mysql,m_connpool);
-		request->process();
+        if(m_stop && m_workqueue.empty())
+        {
+            m_mutex.unlock();
+            break;
+        }
+        
+        if(m_workqueue.empty())
+        {
+            m_mutex.unlock();
+            continue;
+        }
+        
+        T* request = m_workqueue.front();
+        m_workqueue.pop_front();
+        
+        m_mutex.unlock();
+
+        if(!request)
+        {
+            continue;
+        }
+        
+        connectionRAII mysqlcon(
+            &request->m_mysql,
+            m_connpool);
+        request->process();
 	}
 }
 

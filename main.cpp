@@ -381,6 +381,9 @@ int main(int argc, char** argv)
             timeout = false;
         }
     }
+    
+    pool.reset();
+    
     close(epollfd);
     close(listenfd);
     close(pipefd[1]);
