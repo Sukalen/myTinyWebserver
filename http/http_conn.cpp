@@ -27,7 +27,7 @@ const char* error_404_form = "The requested file was not found on this server.\n
 const char* error_500_title = "Internal Error";
 const char* error_500_form = "There was an unusual problem serving the requested file.\n";
 
-const char* doc_root = "/home/suu/myworkspace/myTinyWebServer/root";
+const char* doc_root = "/home/su/myTinyWebserver/root";
 
 int setnonblocking(int fd)
 {
@@ -405,8 +405,17 @@ http_conn::HTTP_CODE http_conn::do_request()
 		strncpy(m_real_file+len,m_url,FILENAME_LEN-len-1);
 	}
 
+	
 	if(stat(m_real_file,&m_file_stat) < 0)
 	{
+		LOG_ERROR(
+        		"stat failed: file=%s errno=%d error=%s",
+        		m_real_file,
+        		errno,
+        		strerror(errno)
+    		);
+    		Log::get_instance()->flush();
+		
 		return NO_RESOURCE;
 	}
 	if(!(m_file_stat.st_mode & S_IROTH))
@@ -639,6 +648,14 @@ bool http_conn::process_write(HTTP_CODE ret)
         break;
     }
     case BAD_REQUEST:
+    {
+	add_status_line(400,error_400_title);
+	add_headers(strlen(error_400_form));
+	if(!add_content(error_400_form))
+		return false;
+	break;
+    }
+    case NO_RESOURCE:
     {
         add_status_line(404, error_404_title);
         add_headers(strlen(error_404_form));
