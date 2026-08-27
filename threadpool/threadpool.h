@@ -6,8 +6,9 @@
 #include<thread>
 #include<vector>
 #include<stdexcept>
+#include<mutex>
+#include<condition_variable>
 
-#include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
 
 
@@ -33,8 +34,9 @@ private:
     std::vector<std::thread> m_threads;
 
 	std::list<T*> m_workqueue;
-	locker m_mutex;
-	sem m_queuestat;
+	std::mutex m_mutex;
+	std::condition_variable m_cond;
+
 	bool m_stop;
 	connection_pool* m_connpool;
 
@@ -62,14 +64,12 @@ threadpool<T>::threadpool(connection_pool* connpool,int thread_number,int max_re
     }
     catch(...)
     {
-        m_mutex.lock();
-        m_stop = true;
-        m_mutex.unlock();
-        
-        for(std::size_t i=0; i < m_threads.size(); ++i)
         {
-            m_queuestat.post();
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_stop = true;
         }
+        
+        m_cond.notify_all();
         
         for(auto& thread:m_threads)
         {
@@ -87,14 +87,12 @@ threadpool<T>::threadpool(connection_pool* connpool,int thread_number,int max_re
 template<typename T>
 threadpool<T>::~threadpool()
 {
-	m_mutex.lock();
-	m_stop = true;
-    m_mutex.unlock();
-
-    for(std::size_t i=0; i < m_threads.size(); ++i)
     {
-        m_queuestat.post();
+	    std::lock_guard<std::mutex> lock(m_mutex);
+	    m_stop = true;
     }
+    
+    m_cond.notify_all();
 
     for(auto& thread:m_threads)
     {
@@ -113,15 +111,15 @@ bool threadpool<T>::append(T* request)
         return false;
     }
 
-	m_mutex.lock();
-	if(m_stop || m_workqueue.size() >= m_max_requests)
-	{
-		m_mutex.unlock();
-		return false;
-	}
-	m_workqueue.push_back(request);
-	m_mutex.unlock();
-	m_queuestat.post();
+    {
+	    std::lock_guard<std::mutex> lock(m_mutex);
+	    if(m_stop || m_workqueue.size() >= m_max_requests)
+	    {
+		    return false;
+	    }
+	    m_workqueue.push_back(request);
+    }
+	m_cond.notify_one();
 	return true;
 }
 
@@ -131,28 +129,22 @@ void threadpool<T>::run()
 {
 	while(true)
 	{
-	    if(!m_queuestat.wait())
-        {
-            continue;
-        }
-        m_mutex.lock();
+        T* request = nullptr;
 
-        if(m_stop && m_workqueue.empty())
         {
-            m_mutex.unlock();
-            break;
+            std::unique_lock<std::mutex> lock(m_mutex);
+            
+            m_cond.wait(lock,[this] { return m_stop || !m_workqueue.empty();});
+
+            if( m_stop && m_workqueue.empty())
+            {
+                break;
+            }
+            
+            request = m_workqueue.front();
+            m_workqueue.pop_front();
         }
-        
-        if(m_workqueue.empty())
-        {
-            m_mutex.unlock();
-            continue;
-        }
-        
-        T* request = m_workqueue.front();
-        m_workqueue.pop_front();
-        
-        m_mutex.unlock();
+            
 
         if(!request)
         {
