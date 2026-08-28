@@ -1,49 +1,66 @@
 #ifndef SQL_CONNECTION_POOL_H
 #define SQL_CONNECTION_POOL_H
 
-#include<stdio.h>
-#include<list>
 #include<mysql/mysql.h>
-#include<error.h>
-#include<string.h>
+
+#include<condition_variable>
+#include<cstddef>
+#include<memory>
+#include<mutex>
+#include<queue>
+#include<vector>
 #include<iostream>
 #include<string>
 
-#include "../lock/locker.h"
 #include "../log/log.h"
-
-using std::string;
-using std::list;
 
 class connection_pool
 {
+    struct MysqlCloser
+    {
+        void operator()(MYSQL* conn) const noexcept
+        {
+            if(conn)
+            {
+                mysql_close(conn);
+            }
+        }
+    };
+
+    using MysqlPtr = std::unique_ptr<MYSQL,MysqlCloser>;
+
 public:
 	MYSQL* get_connection();
 	bool release_connection(MYSQL* conn);
-	int get_free_conn();
-	void destroy_pool();
+	int get_free_conn() const;
 
 	static connection_pool* get_instance();
-	void init(string url,string user,string password,string dbname,int port,unsigned int maxconn);
+	void init(std::string url,std::string user,
+            std::string password,std::string dbname,int port,unsigned int maxconn);
 
-	connection_pool();
 	~connection_pool();
 
-private:
-	unsigned int m_maxconn;
-	unsigned int m_curconn;
-	unsigned int m_freeconn;
-private:
-	locker m_mutex;
-	list<MYSQL*> m_connlist;
-	sem m_reserve;
+    connection_pool(const connection_pool&) = delete;
+    connection_pool& operator=(const connection_pool&) = delete;
 
 private:
-	string m_url;
+    connection_pool() = default;
+
+private:
+
+    std::vector<MysqlPtr> m_connections;
+    std::queue<MYSQL*> m_free_connections;
+    mutable std::mutex m_mutex;
+    std::condition_variable m_cond;
+
+    bool m_initialized = false;
+    bool m_stopping = false;
+
+    std::string m_url;
 	int m_port;
-	string m_user;
-	string m_password;
-	string m_dbname;
+    std::string m_user;
+    std::string m_password;
+    std::string m_dbname;
 };
 
 class connectionRAII
@@ -51,9 +68,12 @@ class connectionRAII
 public:
 	connectionRAII(MYSQL** con,connection_pool* conn_pool);
 	~connectionRAII();
+
+    connectionRAII(const connectionRAII&) = delete;
+    connectionRAII& operator=(const connectionRAII&) = delete;
 private:
-	MYSQL* m_conRAII;
-	connection_pool* m_poolRAII;
+	MYSQL* m_conRAII = nullptr;
+	connection_pool* m_poolRAII = nullptr;
 };
 
 

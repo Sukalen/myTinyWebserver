@@ -115,7 +115,17 @@ int main(int argc, char** argv)
 
     connection_pool* connpool = connection_pool::get_instance();
     //connpool->init("localhost", "root", "root", "websrvdb", 3306, 8);
-	connpool->init("localhost", "webuser", "Web@123456!", "websrvdb", 3306, 8);
+	try
+    {
+        connpool->init("localhost", "webuser", "Web@123456!", "websrvdb", 3306, 8);
+    }
+    catch(const std::exception& e)
+    {
+        LOG_ERROR("initialized mysql connection pool failed: %s",e.what());
+
+        Log::get_instance()->flush();
+        return 1;
+    }
 
     std::unique_ptr<threadpool<http_conn>> pool;
     try
@@ -125,6 +135,7 @@ int main(int argc, char** argv)
     catch (const std::exception& e)
     {
         LOG_ERROR("create threadpool failed:%s", e.what());
+        Log::get_instance()->flush();
         return 1;
     }
 
