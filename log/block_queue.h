@@ -1,233 +1,170 @@
 #ifndef BLOCK_QUEUE_H
 #define BLOCK_QUEUE_H
 
-#include<iostream>
-#include<stdlib.h>
-#include<pthread.h>
-#include<sys/time.h>
-#include "../lock/locker.h"
+#include<vector>
+#include<mutex>
+#include<condition_variable>
+#include<chrono>
+#include<stdexcept>
+#include<cstddef>
+#include<utility>
+
+
 
 template<typename T>
 class block_queue
 {
 public:
-	block_queue(int max_size = 1000)
+	explicit block_queue(std::size_t max_size = 1000)
+        :m_array(max_size), m_size(0), m_max_size(max_size), m_front(0), m_back(0),m_closed(false)
 	{
-		if(max_size <= 0)
+		if( 0 == max_size)
 		{
-			exit(-1);
+			throw std::invalid_argument("block_queue max_size must be positive");
 		}
 
-		m_max_size = max_size;
-		m_array = new T[m_max_size];
-		m_size = 0;
-		m_front = -1;
-		m_back = -1;
 	}
 	
-	~block_queue()
-	{
-		m_mutex.lock();
-		if(m_array != NULL)
-			delete[] m_array;
-		m_mutex.unlock();
-	}
+	~block_queue() = default;
+
+    block_queue(const block_queue&) = delete;
+    block_queue& operator=(const block_queue&) = delete;
 	
-	void resize(int max_size)
-	{
-		if(max_size <= 0)
-		{
-			exit(-1);
-		}
-
-		m_mutex.lock();
-		if(max_size == m_max_size)
-		{
-			m_mutex.unlock();
-			return;
-		}
-
-		T* array = new T[max_size];
-		int count = 0;
-		for(int i=0;i<max_size&&i<m_size;++i)
-		{
-			m_front = (m_front + 1) % m_max_size;
-			array[i] = m_array[m_front];
-			count++;
-		}
-
-		delete[] m_array;
-		m_array = array;
-		m_max_size = max_size;
-		m_size = count;
-		m_front = -1;
-		m_back = -1;
-		m_mutex.unlock();
-	}
-		
 	void clear()
 	{
-		m_mutex.lock();
+        std::lock_guard<std::mutex> lock(m_mutex);
 		m_size = 0;
-		m_front = -1;
-		m_back = -1;
-		m_mutex.unlock();
+		m_front = 0;
+		m_back = 0;
 	}
 
-	bool empty()
+	bool empty() const
 	{
-		m_mutex.lock();
+	    std::lock_guard<std::mutex> lock(m_mutex);
+        return 0 == m_size;
+	}
+
+	bool full() const
+	{
+	    std::lock_guard<std::mutex> lock(m_mutex);
+		return m_size >= m_max_size;
+	}
+
+	bool front(T& value) const
+	{
+	    std::lock_guard<std::mutex> lock(m_mutex);
 		if(0 == m_size)
 		{
-			m_mutex.unlock();
-			return true;
-		}
-		m_mutex.unlock();
-		return false;
-	}
-
-	bool full()
-	{
-		m_mutex.lock();
-		if(m_size >= m_max_size)
-		{
-			m_mutex.unlock();
-			return true;
-		}
-		m_mutex.unlock();
-		return false;
-	}
-
-	bool front(T& value)
-	{
-		m_mutex.lock();
-		if(0 == m_size)
-		{
-			m_mutex.unlock();
 			return false;
 		}
 		value = m_array[m_front];
-		m_mutex.unlock();
 		return true;
 	}
 
-	bool back(T& value)
+	bool back(T& value) const
 	{
-		m_mutex.lock();
+	    std::lock_guard<std::mutex> lock(m_mutex);
 		if(0 == m_size)
 		{
-			m_mutex.unlock();
 			return false;
 		}
-		value = m_array[m_back];
-		m_mutex.unlock();
+        std::size_t last = (m_back + m_max_size - 1)% m_max_size;
+		value = m_array[last];
 		return true;
 	}
 
-	int size()
+	int size() const
 	{
-		int tmp = 0;
-
-		m_mutex.lock();
-		tmp = m_size;
-		m_mutex.unlock();
-		
-		return tmp;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_size;
 	}
 
-	int max_size()
+	int max_size() const
 	{
-		int tmp = 0;
-
-		m_mutex.lock();
-		tmp = m_max_size;
-		m_mutex.unlock();
-
-		return tmp;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_max_size;
 	}
 
 	bool push(const T& item)
 	{
-		m_mutex.lock();
-		if(m_size >= m_max_size)
-		{
-			m_cond.broadcast();
-			m_mutex.unlock();
-			return false;
-		}
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            
+            
+            if(m_closed || m_size >= m_max_size)
+            {
+                return false;
+            }
+            
+            m_array[m_back] = item;
+            m_back = (m_back + 1) % m_max_size;
+            ++m_size;
+        
+        }
 
-		m_back = (m_back + 1) % m_max_size;
-		m_array[m_back] = item;
+        m_cond.notify_one();
 
-		m_size++;
-
-		m_cond.broadcast();
-		m_mutex.unlock();
 		return true;
 	}
 
 	bool pop(T& item)
 	{
-		m_mutex.lock();
+        std::unique_lock<std::mutex> lock(m_mutex);
 
-		while(m_size <= 0)
-		{
-			if(!m_cond.wait(m_mutex.get()))
-			{
-				m_mutex.unlock();
-				return false;
-			}
-		}
+        m_cond.wait(lock,[this]{ return m_closed || m_size > 0;});
 
-		m_front = (m_front + 1) % m_max_size;
-		item = m_array[m_front];
-		m_size--;
-		m_mutex.unlock();
+        if( 0 == m_size)
+        {
+            return false;
+        }
+        
+        item = std::move(m_array[m_front]);
+        
+        m_front = (m_front + 1) % m_max_size;
+        --m_size;
+
 		return true;
 	}
 
 	bool pop(T& item,int timeout_ms)
 	{
-		struct timespec t = {0,0};
-		struct timeval now = {0,0};
-		m_mutex.lock();
-		gettimeofday(&now,NULL);
+        std::unique_lock<std::mutex> lock(m_mutex);
 
-		t.tv_sec = now.tv_sec + timeout_ms/1000;
-		t.tv_nsec = now.tv_usec*1000 + (timeout_ms % 1000)*1000000;
+        bool ready = m_cond.wait_for(
+                lock,
+                std::chrono::milliseconds(timeout_ms),
+                [this]{ return m_closed || m_size > 0;});
+        if( !ready || 0 == m_size)
+        {
+            return false;
+        }
 
-		if(t.tv_nsec >= 1000000000)
-		{
-			t.tv_sec += 1;
-			t.tv_nsec -= 1000000000;
-		}
-
-		while(m_size <= 0)
-		{
-			if(!m_cond.timewait(m_mutex.get(),t))
-			{
-				m_mutex.unlock();
-				return false;
-			}
-		}
-
+        item = std::move(m_array[m_front]);
 		m_front = (m_front + 1) % m_max_size;
-		item = m_array[m_front];
-		m_size--;
-		m_mutex.unlock();
+		--m_size;
 		return true;
 	}	
 
-
+    void close()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_closed = true;
+        }
+        m_cond.notify_all();
+    }
 private:
-	locker m_mutex;
-	cond m_cond;
+    std::vector<T> m_array;
+    
+    std::size_t m_size;
+    std::size_t m_max_size;
+    std::size_t m_front;
+    std::size_t m_back;
+    
+    bool m_closed;
 
-	T* m_array;
-	int m_size;
-	int m_max_size;
-	int m_front;
-	int m_back;
+    mutable std::mutex m_mutex;
+    std::condition_variable m_cond;
 
 };
 

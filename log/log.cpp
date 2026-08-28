@@ -1,194 +1,262 @@
-#include<string.h>
-#include<time.h>
+#include<cstring>
+#include<ctime>
 #include<sys/time.h>
-#include<stdarg.h>
-#include<pthread.h>
+#include<algorithm>
+
 #include "log.h"
 
 
-Log::Log()
-{
-	m_count = 0;
-	m_is_async = false;
-}
-
 Log::~Log()
 {
-	if(m_fp != NULL)
-	{
-		fclose(m_fp);
-	}
-	if(m_log_queue != NULL)
-	{
-		delete m_log_queue;
-		m_log_queue = NULL;
-	}
-	if(m_buf != NULL)
-	{
-		delete[] m_buf;
-		m_buf = NULL;
-	}
+	if(m_log_queue)
+    {
+        m_log_queue->close();
+    }
+
+    if(m_write_thread.joinable())
+    {
+        m_write_thread.join();
+    }
+
+    flush();
 }
 
 bool Log::init(const char* file_name, int log_buf_size, int split_lines, int max_queue_size)
 {
-	if(max_queue_size > 0)
-	{
-		m_is_async = true;
-		m_log_queue = new block_queue<string>(max_queue_size);
-		pthread_t tid;
-		pthread_create(&tid,NULL,flush_log_thread,NULL);
-	}
+	if(nullptr == file_name || log_buf_size <= 0 || split_lines <= 0)
+    {
+        return false;
+    }
 
 	m_log_buf_size = log_buf_size;
-	m_buf = new char[m_log_buf_size];
-	memset(m_buf,'\0',m_log_buf_size);
 	m_split_lines = split_lines;
+    m_count = 0;
 
-	time_t t = time(NULL);
+    m_buf.resize(m_log_buf_size);
 
-	struct tm* sys_tm = localtime(&t);
-	struct tm my_tm = *sys_tm;
+    std::string file_path(file_name);
+    std::size_t pos = file_path.find_last_of('/');
 
-	const char* p = strrchr(file_name,'/');
-	char log_full_name[512] = {0};
+    if( pos == std::string::npos)
+    {
+        m_dir_name.clear();
+        m_log_name = file_path;
+    }
+    else
+    {
+        m_dir_name = file_path.substr(0,pos+1);
+        m_log_name = file_path.substr(pos+1);
+    }
 
-	if(NULL == p)
-	{
-		snprintf(log_full_name,sizeof(log_full_name)-1,"%d_%02d_%02d_%s",my_tm.tm_year+1900,my_tm.tm_mon+1,my_tm.tm_mday,file_name);
-	}
-	else
-	{
-		strcpy(log_name, p+1);
-		strncpy(dir_name, file_name, p-file_name + 1);
-		snprintf(log_full_name,sizeof(log_full_name)-1,"%s%d_%02d_%02d_%s",dir_name,my_tm.tm_year+1900,my_tm.tm_mon+1,my_tm.tm_mday,log_name);
-	}
+    time_t t = time(nullptr);
 
-	m_today = my_tm.tm_mday;
+    struct tm my_tm;
+    localtime_r(&t,&my_tm);
 
-	m_fp = fopen(log_full_name,"a");
-	if( NULL == m_fp)
-	{
-		return false;
-	}
+    m_today = my_tm.tm_mday;
+    
+    char log_full_name[512] = {0};
 
-	return true;
+    std::snprintf(log_full_name,sizeof(log_full_name),"%s%d_%02d_%02d_%s",
+            m_dir_name.c_str(),
+            my_tm.tm_year+1900,
+            my_tm.tm_mon+1,
+            my_tm.tm_mday,
+            m_log_name.c_str());
+
+    FILE* fp = std::fopen(log_full_name,"a");
+
+    if( nullptr == fp)
+    {
+        return false;
+    }
+
+    m_fp.reset(fp);
+
+    if(max_queue_size > 0)
+    {
+        m_log_queue = std::make_unique<block_queue<std::string>>(
+                static_cast<std::size_t>(max_queue_size));
+
+        m_is_async = true;
+        
+        try
+        {
+            m_write_thread = std::thread(&Log::async_write_log,this);
+        }
+        catch(...)
+        {
+            m_is_async = false;
+            m_log_queue.reset();
+            return false;
+        }
+    }
+
+    return true;
 }
 
+void Log::async_write_log()
+{
+    std::string single_log;
+
+    while(m_log_queue && m_log_queue->pop(single_log))
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        if(m_fp)
+        {
+            std::fputs(single_log.c_str(),m_fp.get());
+        }
+    }
+}
 
 void Log::write_log(int level,const char* format,...)
 {
 	struct timeval now = {0,0};
-	gettimeofday(&now,NULL);
+	gettimeofday(&now,nullptr);
 	time_t t = now.tv_sec;
-	struct tm* sys_tm = localtime(&t);
-	struct tm my_tm = *sys_tm;
-	char s[16] = {0};
+	
+    struct tm my_tm;
+	localtime_r(&t,&my_tm);
+
+    const char* level_str = "[info]:";
 
 	switch(level)
 	{
 		case 0:
-		{
-			strcpy(s,"[debug]:");
+			level_str = "[debug]:";
 			break;
-		}
+		
 		case 1:
-		{
-			strcpy(s,"[info]:");
+			level_str = "[info]:";
 			break;
-		}
+		
 		case 2:
-		{
-			strcpy(s,"[warn]:");
+			level_str = "[warn]:";
 			break;
-		}
+		
 		case 3:
-		{
-			strcpy(s,"[error]:");
+			level_str = "[error]:";
 			break;
-		}	
+			
 		default:
-		{
-			strcpy(s,"[info]:");
+			level_str = "[info]:";
 			break;
-		}
+		
 	}
-
-	m_mutex.lock();
-	m_count++;
-	if(m_today != my_tm.tm_mday || m_count % m_split_lines == 0)
-	{
-		char new_log[512] = {0};
-		fflush(m_fp);
-		fclose(m_fp);
-		char tail[16] = {0};
-
-		snprintf(tail,16,"%d_%02d_%02d_",my_tm.tm_year+1900,my_tm.tm_mon+1,my_tm.tm_mday);
-
-		if(m_today != my_tm.tm_mday)
-		{
-			snprintf(new_log,sizeof(new_log)-1,"%s%s%s",dir_name,tail,log_name);
-			m_today = my_tm.tm_mday;
-			m_count = 0;
-		}
-		else
-		{
-			snprintf(new_log,sizeof(new_log)-1,"%s%s%s.%lld",dir_name,tail,log_name,m_count/m_split_lines);
-		}
-		m_fp = fopen(new_log,"a");
-	}
-	m_mutex.unlock();
 
 	va_list arg_list;
 	va_start(arg_list,format);
 
-	string log_str;
+    std::string log_str;
 
-	m_mutex.lock();
-	int n = snprintf(m_buf,48,"%d-%02d-%02d %02d:%02d:%02d.%06ld %s ",my_tm.tm_year + 1900,my_tm.tm_mon+1,
-			my_tm.tm_mday,my_tm.tm_hour,my_tm.tm_min,my_tm.tm_sec,now.tv_usec,s);
-	int m = vsnprintf(m_buf+n,m_log_buf_size-n-1,format,arg_list);
-	m_buf[n+m] = '\n';
-	m_buf[n+m+1] = '\0';
-	log_str = m_buf;
-	m_mutex.unlock();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+	    ++m_count;
+	    if(m_today != my_tm.tm_mday || m_count % m_split_lines == 0)
+	    {
+		    char new_log[512] = {0};
+
+		    if(m_today != my_tm.tm_mday)
+		    {
+                std::snprintf(new_log,sizeof(new_log),"%s%d_%02d_%02d_%s",
+                    m_dir_name.c_str(),
+                    my_tm.tm_year + 1900,
+                    my_tm.tm_mon + 1,
+                    my_tm.tm_mday,
+                    m_log_name.c_str());
+
+			    m_today = my_tm.tm_mday;
+			    m_count = 0;
+		    }
+		    else
+		    {
+                std::snprintf(new_log,sizeof(new_log),"%s%d_%02d_%02d_%s.%lld",
+                    m_dir_name.c_str(),
+                    my_tm.tm_year + 1900,
+                    my_tm.tm_mon + 1,
+                    my_tm.tm_mday,
+                    m_log_name.c_str(),
+                    m_count / m_split_lines);
+            }
+		    
+		    FILE* new_fp = std::fopen(new_log,"a");
+
+            if(new_fp)
+            {
+                if(m_fp)
+                {
+                    std::fflush(m_fp.get());
+                }
+
+                m_fp.reset(new_fp);
+            }
+	    }
+
+	    int n = std::snprintf(m_buf.data(),m_buf.size(),
+                "%d-%02d-%02d %02d:%02d:%02d.%06ld %s ",
+                my_tm.tm_year + 1900,
+                my_tm.tm_mon + 1,
+			    my_tm.tm_mday,
+                my_tm.tm_hour,
+                my_tm.tm_min,
+                my_tm.tm_sec,
+                now.tv_usec,
+                level_str);
+        if( n < 0)
+        {
+            va_end(arg_list);
+            return;
+        }
+
+        std::size_t offset = std::min<std::size_t>(
+                static_cast<std::size_t>(n),m_buf.size()-1);
+
+	    int m = std::vsnprintf(
+                m_buf.data()+offset,
+                m_buf.size()-offset,
+                format,
+                arg_list);
+        if( m < 0)
+        {
+            va_end(arg_list);
+            return;
+        }
+        std::size_t length = std::min<std::size_t>(
+                offset+static_cast<std::size_t>(m), m_buf.size()-1);
+        if(length + 1 < m_buf.size())
+        {
+            m_buf[length++] = '\n';
+            m_buf[length] = '\0';
+        }
+
+        log_str.assign(m_buf.data(),length);
+    }
 
 	va_end(arg_list);
 
-	if(m_is_async && !m_log_queue->full())
+	if(m_is_async && m_log_queue && m_log_queue->push(log_str))
 	{
-		m_log_queue->push(log_str);
+		return;
+	}
 
-	}
-	else
-	{
-		m_mutex.lock();
-		fputs(log_str.c_str(),m_fp);
-		m_mutex.unlock();
-	}
+	std::lock_guard<std::mutex> lock(m_mutex);
+    if(m_fp)
+    {
+        std::fputs(log_str.c_str(),m_fp.get());
+    }
+	
 }
 
-void Log::flush(void)
+void Log::flush()
 {
-	m_mutex.lock();
-	fflush(m_fp);
-	m_mutex.unlock();
+	std::lock_guard<std::mutex> lock(m_mutex);
+
+    if(m_fp)
+    {
+        std::fflush(m_fp.get());
+    }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 

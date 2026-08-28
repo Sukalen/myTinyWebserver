@@ -23,8 +23,8 @@
 #define TIMESLOT 5
 #define TIMESLOT_TIMES 12
 
-//#define ASYNLOG
-#define SYNLOG
+#define ASYNLOG
+//#define SYNLOG
 
 
 #define listenfdET
