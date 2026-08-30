@@ -16,14 +16,12 @@
 #include<string.h>
 #include<stdarg.h>
 #include<errno.h>
-#include<pthread.h>
+#include<atomic>
+#include<mutex>
+#include<string>
 #include<map>
 
-#include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
-
-using std::map;
-using std::string;
 
 class http_conn
 {
@@ -86,11 +84,13 @@ private:
 	bool add_linger();
 	bool add_blank_line();
 
+	bool parse_user_form(std::string& username, std::string& password) const;
+
 public:
 	static int m_epollfd;
-	static int m_user_count;
-	static map<string,string> m_users;
-	static locker m_mutex;
+	static std::atomic<int> m_user_count;
+	static std::map<std::string,std::string> m_users;
+	static std::mutex m_mutex;
 	MYSQL* m_mysql;
 
 private:

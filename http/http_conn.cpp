@@ -1,5 +1,11 @@
 #include<mysql/mysql.h>
 #include<fstream>
+#include<string>
+#include<map>
+#include<mutex>
+#include<atomic>
+#include<memory>
+
 
 #include "http_conn.h"
 #include "../log/log.h"
@@ -13,9 +19,6 @@
 #define listenfdET
 //#define listenfdLT
 
-using std::map;
-using std::string;
-using std::pair;
 
 const char* ok_200_title = "OK";
 const char* error_400_title = "Bad Request";
@@ -27,7 +30,7 @@ const char* error_404_form = "The requested file was not found on this server.\n
 const char* error_500_title = "Internal Error";
 const char* error_500_form = "There was an unusual problem serving the requested file.\n";
 
-const char* doc_root = "/home/su/myTinyWebserver/root";
+const char* doc_root = "/home/suu/myworkspace/myTinyWebserver/root";
 
 int setnonblocking(int fd)
 {
@@ -77,10 +80,31 @@ void modfd(int epollfd,int fd,int ev)
 	epoll_ctl(epollfd,EPOLL_CTL_MOD,fd,&event);
 }
 
+
+
+namespace
+{
+struct MysqlResultDeleter
+{
+	void operator()(MYSQL_RES* result) const noexcept
+	{
+		if(result)
+		{
+			mysql_free_result(result);
+		}
+	}
+};
+
+using MysqlResultPtr = std::unique_ptr<MYSQL_RES, MysqlResultDeleter>;
+}
+
+
+
+
 int http_conn::m_epollfd = -1;
-int http_conn::m_user_count = 0;
-map<string,string> http_conn::m_users;
-locker http_conn::m_mutex;
+std::atomic<int> http_conn::m_user_count{0};
+std::map<std::string, std::string> http_conn::m_users;
+std::mutex http_conn::m_mutex;
 
 void http_conn::init()
 {
@@ -88,24 +112,35 @@ void http_conn::init()
 	memset(m_write_buf,'\0',WRITE_BUFFER_SIZE);
 	memset(m_real_file,'\0',FILENAME_LEN);
 	
-	m_mysql = NULL;
+	m_mysql = nullptr;
+
 	m_read_idx = 0;
 	m_checked_idx = 0;
 	m_start_line = 0;
+
 	m_write_idx = 0;
+
 	m_check_state = CHECK_STATE_REQUESTLINE;
 	m_method = GET;
-	m_url = NULL;
-	m_version = NULL;
-	m_host = NULL;
+
+	m_url = nullptr;
+	m_version = nullptr;
+	m_host = nullptr;
+	m_string = nullptr;
+
 	m_content_length = 0;
 	m_linger = false;
 	m_cgi = 0;
+
+	m_file_address = nullptr;
+
+	m_iv_count = 0;
+
 	m_bytes_to_send = 0;
 	m_bytes_have_send = 0;
 }
 
-void http_conn::init(int sockfd,const struct sockaddr_in& addr)
+void http_conn::init(int sockfd, const struct sockaddr_in& addr)
 {
 	m_sockfd = sockfd;
 	m_address = addr;
@@ -117,41 +152,96 @@ void http_conn::init(int sockfd,const struct sockaddr_in& addr)
 	addfd(m_epollfd,sockfd,false,true);
 #endif
 
-	m_user_count++;
+	m_user_count.fetch_add(1, std::memory_order_relaxed);
+
 	init();
 }
 	
 void http_conn::close_conn(bool real_close)
 {
-	if(real_close && (m_sockfd!=-1))
+	if(real_close && m_sockfd!=-1)
 	{
 		removefd(m_epollfd,m_sockfd);
+
 		m_sockfd = -1;
-		m_user_count--;
+
+		m_user_count.fetch_sub(1, std::memory_order_relaxed);
 	}
 }
 
 void http_conn::initmysql_result(connection_pool* connpool)
 {
-	MYSQL* mysql = NULL;
-	connectionRAII mysqlcon(&mysql,connpool);
+	MYSQL* mysql = nullptr;
 
-	if(mysql_query(mysql,"SELECT username,passwd FROM user"))
+	connectionRAII mysqlcon(&mysql, connpool);
+
+	if(mysql_query(mysql,"SELECT username,passwd FROM user") != 0)
 	{
-		LOG_ERROR("SELECT error:%s\n",mysql_error(mysql));
+		LOG_ERROR("SELECT error: %s", mysql_error(mysql));
+		return;
 	}
 
-	MYSQL_RES* result = mysql_store_result(mysql);
-	//int num_fields = mysql_num_fields(result);
-	//MYSQL_FIELD* fields = mysql_fetch_fields(result);
+	MysqlResultPtr result(mysql_store_result(mysql));
 
-	while(MYSQL_ROW row = mysql_fetch_row(result))
+	if(!result)
 	{
-		string temp1(row[0]);
-		string temp2(row[1]);
-		m_users[temp1] = temp2;
+		LOG_ERROR("mysql_store_result failed: %s", mysql_error(mysql));
+		return;
 	}
+
+	std::map<std::string, std::string> loaded_users;
+
+	while(MYSQL_ROW row = mysql_fetch_row(result.get()))
+	{
+		if(!row[0] || !row[1])
+		{
+			continue;
+		}
+
+		loaded_users.emplace(row[0], row[1]);
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		m_users = std::move(loaded_users);
+	}
+
 }
+bool http_conn::parse_user_form(std::string& username, std::string& password) const
+{
+	if(!m_string)
+	{
+		return false;
+	}
+
+	std::string body(m_string);
+
+	std::size_t amp = body.find('&');
+
+	if(std::string::npos == amp)
+	{
+		return false;
+	}
+
+	std::size_t first_equal = body.find('=');
+
+	std::size_t second_equal = body.find('=', amp+1);
+
+	if( std::string::npos == first_equal ||
+			std::string::npos == second_equal ||
+			first_equal >= amp)
+	{
+		return false;
+	}
+
+	username = body.substr(first_equal + 1, amp-first_equal-1);
+
+	password = body.substr(second_equal+1);
+
+	return !username.empty() && !password.empty();
+}
+
 
 http_conn::LINE_STATUS http_conn::parse_line()
 {
@@ -301,136 +391,222 @@ http_conn::HTTP_CODE http_conn::parse_content(char* text)
 
 http_conn::HTTP_CODE http_conn::do_request()
 {
-	strcpy(m_real_file,doc_root);
-	int len = strlen(doc_root);
-	const char* p = strrchr(m_url,'/');
+    if(!m_url)
+    {
+        return BAD_REQUEST;
+    }
 
-	if(1 == m_cgi && ('2' == *(p+1) || '3' == *(p+1)))
-	{
-		char* real_url = (char*)malloc(sizeof(char)*200);
-		strcpy(real_url,"/");
-		strcat(real_url,m_url+2);
-		strncpy(m_real_file+len,real_url,FILENAME_LEN-len-1);
-		free(real_url);
+    const char* p =
+        strrchr(m_url, '/');
 
-		char name[100],password[100];
-		int i;
-		for(i=5;m_string[i]!='&';++i)
-			name[i-5] = m_string[i];
-		name[i-5]='\0';
-		int j=0;
-		for(i=i+10;m_string[i]!='\0';++i,++j)
-			password[j] = m_string[i];
-		password[j] = '\0';
+    if(!p)
+    {
+        return BAD_REQUEST;
+    }
 
-		if('2' == *(p+1))
-		{
-			if(m_users.find(name) != m_users.end() && m_users[name]==password)
-			{
-				strcpy(m_url,"/welcome.html");
-			}
-			else
-			{
-				strcpy(m_url,"/logError.html");
-			}
-		}
-		else if('3' == *(p+1))
-		{
-			if(m_users.find(name) == m_users.end())
-			{
-				char* sql_insert = (char*)malloc(sizeof(char)*200);
-				strcpy(sql_insert, "INSERT INTO user(username, passwd) VALUES(");
-            	strcat(sql_insert, "'");
-            	strcat(sql_insert, name);
-            	strcat(sql_insert, "', '");
-            	strcat(sql_insert, password);
-            	strcat(sql_insert, "')");
+    const char route = *(p + 1);
 
-				m_mutex.lock();
-				int res = mysql_query(m_mysql,sql_insert);
-				m_users.insert(pair<string,string>(name,password));
-				m_mutex.unlock();
-				
-				free(sql_insert);
+    std::string target_url(m_url);
 
-				if(!res)
-				{
-					strcpy(m_url,"/log.html");
-				}
-				else
-				{
-					strcpy(m_url,"/registerError.html");
-				}
-			}
-			else
-			{
-				strcpy(m_url,"/registerError.html");
-			}
-		}
-	}
-	if('0' == *(p+1))
-	{
-		char* real_url = (char*)malloc(sizeof(char)*200);
-		strcpy(real_url,"/register.html");
-		strncpy(m_real_file+len,real_url,strlen(real_url));
-		free(real_url);
+    if(m_cgi == 1 &&
+       (route == '2' || route == '3'))
+    {
+        std::string username;
+        std::string password;
 
-	}
-	else if('1' == *(p+1))
-	{
-		char* real_url = (char*)malloc(sizeof(char)*200);
-		strcpy(real_url,"/log.html");
-		strncpy(m_real_file+len,real_url,strlen(real_url));
-		free(real_url);
+        if(!parse_user_form(
+                username,
+                password))
+        {
+            return BAD_REQUEST;
+        }
 
-	}
-	else if('5' == *(p+1))
-	{
-		char* real_url = (char*)malloc(sizeof(char)*200);
-		strcpy(real_url,"/picture.html");
-		strncpy(m_real_file+len,real_url,strlen(real_url));
-		free(real_url);
+        
+        if(route == '2')
+        {
+            bool login_success = false;
 
-	}
-	else if('6' == *(p+1))
-	{
-		char* real_url = (char*)malloc(sizeof(char)*200);
-		strcpy(real_url,"/video.html");
-		strncpy(m_real_file+len,real_url,strlen(real_url));
-		free(real_url);
+            {
+                std::lock_guard<std::mutex>
+                    lock(m_mutex);
 
-	}
-	else
-	{
-		strncpy(m_real_file+len,m_url,FILENAME_LEN-len-1);
-	}
+                auto it =
+                    m_users.find(username);
 
-	
-	if(stat(m_real_file,&m_file_stat) < 0)
-	{
-		LOG_ERROR(
-        		"stat failed: file=%s errno=%d error=%s",
-        		m_real_file,
-        		errno,
-        		strerror(errno)
-    		);
-    		Log::get_instance()->flush();
-		
-		return NO_RESOURCE;
-	}
-	if(!(m_file_stat.st_mode & S_IROTH))
-	{
-		return FORBIDDEN_REQUEST;
-	}
-	if(S_ISDIR(m_file_stat.st_mode))
-	{
-		return BAD_REQUEST;
-	}
+                login_success =
+                    it != m_users.end() &&
+                    it->second == password;
+            }
 
-	int fd = open(m_real_file,O_RDONLY);
-	m_file_address = (char*)mmap(0,m_file_stat.st_size,PROT_READ,MAP_PRIVATE,fd,0);
-	close(fd);
-	return FILE_REQUEST;
+            target_url =
+                login_success
+                ? "/welcome.html"
+                : "/logError.html";
+        }
+
+        
+        else
+        {
+            bool already_exists = false;
+
+            {
+                std::lock_guard<std::mutex>
+                    lock(m_mutex);
+
+                already_exists =
+                    m_users.find(username)
+                    != m_users.end();
+            }
+
+            if(already_exists)
+            {
+                target_url =
+                    "/registerError.html";
+            }
+            else
+            {
+                std::string sql_insert =
+                    "INSERT INTO user(username, passwd) "
+                    "VALUES('" +
+                    username +
+                    "', '" +
+                    password +
+                    "')";
+
+                int res =
+                    mysql_query(
+                        m_mysql,
+                        sql_insert.c_str());
+
+                if(res == 0)
+                {
+                    {
+                        std::lock_guard<std::mutex>
+                            lock(m_mutex);
+
+                        m_users.emplace(
+                            username,
+                            password);
+                    }
+
+                    target_url =
+                        "/log.html";
+                }
+                else
+                {
+                    LOG_ERROR(
+                        "insert user failed:%s",
+                        mysql_error(m_mysql));
+
+                    target_url =
+                        "/registerError.html";
+                }
+            }
+        }
+    }
+
+    if(route == '0')
+    {
+        target_url = "/register.html";
+    }
+    else if(route == '1')
+    {
+        target_url = "/log.html";
+    }
+    else if(route == '5')
+    {
+        target_url = "/picture.html";
+    }
+    else if(route == '6')
+    {
+        target_url = "/video.html";
+    }
+
+    std::string full_path =
+        std::string(doc_root) +
+        target_url;
+
+    if(full_path.size() >= FILENAME_LEN)
+    {
+        return BAD_REQUEST;
+    }
+
+    std::snprintf(
+        m_real_file,
+        FILENAME_LEN,
+        "%s",
+        full_path.c_str());
+
+    if(stat(
+            m_real_file,
+            &m_file_stat) < 0)
+    {
+        LOG_ERROR(
+            "stat failed: file=%s errno=%d error=%s",
+            m_real_file,
+            errno,
+            strerror(errno));
+
+        return NO_RESOURCE;
+    }
+
+    if(!(m_file_stat.st_mode & S_IROTH))
+    {
+        return FORBIDDEN_REQUEST;
+    }
+
+    if(S_ISDIR(m_file_stat.st_mode))
+    {
+        return BAD_REQUEST;
+    }
+
+    if(m_file_stat.st_size == 0)
+    {
+        m_file_address = nullptr;
+        return FILE_REQUEST;
+    }
+
+    int fd =
+        open(m_real_file, O_RDONLY);
+
+    if(fd < 0)
+    {
+        if(errno == EACCES)
+        {
+            return FORBIDDEN_REQUEST;
+        }
+
+        return INTERNAL_ERROR;
+    }
+
+    void* mapped =
+        mmap(
+            nullptr,
+            m_file_stat.st_size,
+            PROT_READ,
+            MAP_PRIVATE,
+            fd,
+            0);
+
+    close(fd);
+
+    if(mapped == MAP_FAILED)
+    {
+        m_file_address = nullptr;
+
+        LOG_ERROR(
+            "mmap failed: file=%s errno=%d error=%s",
+            m_real_file,
+            errno,
+            strerror(errno));
+
+        return INTERNAL_ERROR;
+    }
+
+    m_file_address =
+        static_cast<char*>(mapped);
+
+    return FILE_REQUEST;
 }
 
 http_conn::HTTP_CODE http_conn::process_read()
@@ -611,9 +787,9 @@ bool http_conn::add_status_line(int status, const char *title)
 }
 bool http_conn::add_headers(int content_len)
 {
-    add_content_length(content_len);
-    add_linger();
-    add_blank_line();
+    return add_content_length(content_len) &&
+    		add_linger() &&
+    		add_blank_line();
 }
 bool http_conn::add_content_length(int content_len)
 {
@@ -711,11 +887,13 @@ void http_conn::process()
 		modfd(m_epollfd,m_sockfd,EPOLLIN);
 		return;
 	}
-	bool write_ret = process_write(read_ret);
-	if(!write_ret)
+
+	if(!process_write(read_ret))
 	{
 		close_conn();
+		return;
 	}
+
 	modfd(m_epollfd,m_sockfd,EPOLLOUT);
 }
 

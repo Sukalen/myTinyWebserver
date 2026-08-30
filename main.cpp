@@ -11,7 +11,6 @@
 #include<memory>
 #include<vector>
 
-#include "./lock/locker.h"
 #include "./threadpool/threadpool.h"
 #include "./timer/lst_timer.h"
 #include "./http/http_conn.h"
@@ -81,7 +80,7 @@ void cb_func(client_data* user_data)
 	}
 	epoll_ctl(epollfd,EPOLL_CTL_DEL,user_data->sockfd,0);
 	close(user_data->sockfd);
-	http_conn::m_user_count--;
+	http_conn::m_user_count.fetch_sub(1, std::memory_order_relaxed);
 	LOG_INFO("close fd %d",user_data->sockfd);
 	Log::get_instance()->flush();
 }
@@ -237,7 +236,7 @@ int main(int argc, char** argv)
                     LOG_ERROR("%s:errno is:%d", "accept error", errno);
                     continue;
                 }
-                if (http_conn::m_user_count >= MAX_FD)
+                if (http_conn::m_user_count.load(std::memory_order_relaxed) >= MAX_FD)
                 {
                     show_error(connfd, "Internal server busy");
                     LOG_ERROR("%s", "Internal server busy");
@@ -265,7 +264,7 @@ int main(int argc, char** argv)
                         LOG_ERROR("%s:errno is:%d", "accept error", errno);
                         break;
                     }
-                    if (http_conn::m_user_count >= MAX_FD)
+                	if (http_conn::m_user_count.load(std::memory_order_relaxed) >= MAX_FD)
                     {
                         show_error(connfd, "Internal server busy");
                         LOG_ERROR("%s", "Internal server busy");
