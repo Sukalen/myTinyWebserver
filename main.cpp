@@ -11,6 +11,8 @@
 #include<memory>
 #include<vector>
 
+#include<chrono>
+
 #include "./threadpool/threadpool.h"
 #include "./timer/lst_timer.h"
 #include "./http/http_conn.h"
@@ -29,6 +31,11 @@
 #define listenfdET
 
 //#define listenfdLT
+
+
+
+const std::chrono::seconds CONNECTION_TIMEOUT{ TIMESLOT_TIMES * TIMESLOT};
+
 
 extern int addfd(int epollfd,int fd,bool is_et,bool one_shot);
 extern int removefd(int epollfd,int fd);
@@ -72,17 +79,25 @@ void timer_handler()
 
 void cb_func(client_data* user_data)
 {
-	if(NULL == user_data)
+	if(nullptr == user_data)
 	{
-		LOG_ERROR("user_data is NULL");
+		LOG_ERROR("user_data is nullptr");
 		Log::get_instance()->flush();
-		exit(1);
+		return;
 	}
-	epoll_ctl(epollfd,EPOLL_CTL_DEL,user_data->sockfd,0);
-	close(user_data->sockfd);
-	http_conn::m_user_count.fetch_sub(1, std::memory_order_relaxed);
-	LOG_INFO("close fd %d",user_data->sockfd);
-	Log::get_instance()->flush();
+	
+	const int sockfd = user_data->sockfd;
+
+	if(user_data->conn)
+	{
+		user_data->conn->close_conn();
+	}
+
+	user_data->sockfd = -1;
+	user_data->timer = nullptr;
+
+	LOG_INFO("close fd %d",sockfd);
+
 }
 
 void show_error(int connfd, const char* info)
@@ -91,6 +106,21 @@ void show_error(int connfd, const char* info)
     send(connfd, info, strlen(info), 0);
     close(connfd);
 }
+
+void close_client(client_data* user_data)
+{
+	if(!user_data)
+	{
+		return;
+	}
+
+	if(user_data->timer)
+	{
+		timer_lst.del_timer(user_data->timer);
+	}
+	cb_func(user_data);
+}
+
 
 int main(int argc, char** argv)
 {
@@ -246,13 +276,10 @@ int main(int argc, char** argv)
 
                 users_timer[connfd].address = client_address;
                 users_timer[connfd].sockfd = connfd;
-                util_timer* timer = new util_timer;
-                timer->user_data = &users_timer[connfd];
-                timer->cb_func = cb_func;
-                time_t cur = time(NULL);
-                timer->expire = cur + TIMESLOT_TIMES * TIMESLOT;
-                users_timer[connfd].timer = timer;
-                timer_lst.add_timer(timer);
+				users_timer[connfd].conn = &users[connfd];
+				users_timer[connfd].timer = timer_lst.add_timer(
+						&users_timer[connfd], cb_func, CONNECTION_TIMEOUT);
+
 #endif
 
 #ifdef listenfdET
@@ -261,6 +288,15 @@ int main(int argc, char** argv)
                     int connfd = accept(listenfd, (struct sockaddr*)&client_address, &client_addrlength);
                     if (connfd < 0)
                     {
+						if( EAGAIN == errno || EWOULDBLOCK == errno)
+						{
+							break;
+						}
+
+						if(EINTR == errno)
+						{
+							continue;
+						}
                         LOG_ERROR("%s:errno is:%d", "accept error", errno);
                         break;
                     }
@@ -274,13 +310,9 @@ int main(int argc, char** argv)
 
                     users_timer[connfd].address = client_address;
                     users_timer[connfd].sockfd = connfd;
-                    util_timer* timer = new util_timer;
-                    timer->user_data = &users_timer[connfd];
-                    timer->cb_func = cb_func;
-                    time_t cur = time(NULL);
-                    timer->expire = cur + TIMESLOT_TIMES * TIMESLOT;
-                    users_timer[connfd].timer = timer;
-                    timer_lst.add_timer(timer);
+					users_timer[connfd].conn = &users[connfd];
+					users_timer[connfd].timer = timer_lst.add_timer(
+						&users_timer[connfd], cb_func, CONNECTION_TIMEOUT);
                 }
                 continue;
 #endif
@@ -288,13 +320,7 @@ int main(int argc, char** argv)
 
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             {
-                util_timer* timer = users_timer[sockfd].timer;
-                timer->cb_func(&users_timer[sockfd]);
-
-                if (timer)
-                {
-                    timer_lst.del_timer(timer);
-                }
+				close_client(&users_timer[sockfd]);
             }
 
             else if ((sockfd == pipefd[0]) && (events[i].events & EPOLLIN))
@@ -342,20 +368,13 @@ int main(int argc, char** argv)
 
                     if (timer)
                     {
-                        time_t cur = time(NULL);
-                        timer->expire = cur + TIMESLOT_TIMES * TIMESLOT;
-                        LOG_INFO("%s", "adjust timer once");
-                        Log::get_instance()->flush();
-                        timer_lst.adjust_timer(timer);
+                        timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
+						LOG_INFO("%s","adjust timer once");
                     }
                 }
                 else
                 {
-                    timer->cb_func(&users_timer[sockfd]);
-                    if (timer)
-                    {
-                        timer_lst.del_timer(timer);
-                    }
+					close_client(&users_timer[sockfd]);
                 }
             }
             else if (events[i].events & EPOLLOUT)
@@ -368,21 +387,14 @@ int main(int argc, char** argv)
 
                     if (timer)
                     {
-                        time_t cur = time(NULL);
-                        timer->expire = cur + TIMESLOT_TIMES * TIMESLOT;
-                        LOG_INFO("%s", "adjust timer once");
-                        Log::get_instance()->flush();
-                        timer_lst.adjust_timer(timer);
+                        timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
+						LOG_INFO("%s","adjust timer once");
                     }
                 }
                 else
                 {
-                    timer->cb_func(&users_timer[sockfd]);
-                    if (timer)
-                    {
-                        timer_lst.del_timer(timer);
-                    }
-                }
+					close_client(&users_timer[sockfd]);
+				} 
             }
         }
         if (timeout)

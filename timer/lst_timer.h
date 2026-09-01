@@ -1,185 +1,181 @@
 #ifndef LST_TIMER
 #define LST_TIMER
 
-#include<time.h>
 #include<arpa/inet.h>
+#include<chrono>
+#include<list>
+#include<algorithm>
 
 #include "../log/log.h"
 
+class http_conn;
 class util_timer;
 
 struct client_data
 {
-	struct sockaddr_in address;
-	int sockfd;
-	util_timer* timer;
+	struct sockaddr_in address{};
+	int sockfd = -1;
+
+	http_conn* conn = nullptr;
+	util_timer* timer = nullptr;
 };
 
 class util_timer
 {
 public:
-	util_timer():prev(NULL),next(NULL){}
+	using Clock = std::chrono::steady_clock;
+	using TimePoint = Clock::time_point;
+	using Callback = void (*)(client_data*);
 
 public:
-	time_t expire;
-	void (*cb_func)(client_data*);
-	client_data* user_data;
-	util_timer* prev;
-	util_timer* next;
+	TimePoint expire{};
+	
+	Callback cb_func = nullptr;
+
+	client_data* user_data = nullptr;
 };
 
 
 class sort_timer_lst
 {
 public:
-	sort_timer_lst():head(NULL),tail(NULL){}
-	~sort_timer_lst()
+	sort_timer_lst() = default;
+	~sort_timer_lst() = default;
+
+	util_timer* add_timer(client_data* user_data, util_timer::Callback cb_func, std::chrono::seconds timeout)
 	{
-		util_timer* tmp = head;
-		while(tmp)
+		util_timer timer;
+
+		timer.expire = util_timer::Clock::now() + timeout;
+		timer.cb_func = cb_func;
+		timer.user_data = user_data;
+
+		auto pos = std::find_if(m_timers.begin(), m_timers.end(),
+				[&timer](const util_timer& current)
+				{
+					return timer.expire < current.expire;
+				});
+
+		auto it = m_timers.insert(pos,std::move(timer));
+
+		util_timer* timer_ptr = &(*it);
+
+		if(user_data)
 		{
-			head = tmp->next;
-			delete tmp;
-			tmp = head;
+			user_data->timer = timer_ptr;
 		}
+
+
+		return timer_ptr;
+
 	}
 
-	void add_timer(util_timer* timer)
+	void adjust_timer(util_timer* timer, std::chrono::seconds timeout)
 	{
 		if(!timer)
-			return;
-		if(!head)
 		{
-			head = tail = timer;
 			return;
 		}
-		if(timer->expire < head->expire)
-		{
-			timer->next = head;
-			head->prev = timer;
-			head = timer;
-			return;
-		}
-		add_timer(timer,head);
-	}
 
-	void adjust_timer(util_timer* timer)
-	{
-		if(!timer)
+		auto it = find_timer(timer);
+
+		if( it == m_timers.end())
 		{
 			return;
 		}
-		util_timer* tmp = timer->next;
 		
-		if(!tmp || timer->expire < tmp->expire)
-		{
-			return;
-		}
+		it->expire = util_timer::Clock::now() + timeout;
+		
+		m_timers.splice(m_timers.end(), m_timers, it);
 
-		if(timer == head)
-		{
-			head = head->next;
-			head->prev = NULL;
-			timer->next = NULL;
-			add_timer(timer,head);
-		}
-		else
-		{
-			timer->prev->next = timer->next;
-			timer->next->prev = timer->prev;
-			add_timer(timer,timer->next);
-		}
+		auto moved = std::prev(m_timers.end());
+
+		auto pos = std::find_if(m_timers.begin(), moved,
+				[moved](const util_timer& current)
+				{
+					return moved->expire < current.expire;
+				});
+
+		m_timers.splice(pos, m_timers, moved);
+
 	}
 
 	void del_timer(util_timer* timer)
 	{
 		if(!timer)
-			return;
-		
-		if(timer == head && timer == tail)
 		{
-			delete timer;
-			head = NULL;
-			tail = NULL;
 			return;
 		}
 
-		if(timer == head)
+		auto it = find_timer(timer);
+
+		if( it == m_timers.end())
 		{
-			head = head->next;
-			head->prev = NULL;
-			delete timer;
 			return;
 		}
 
-		if(timer == tail)
+
+		if(it->user_data && it->user_data->timer == timer)
 		{
-			tail = tail->prev;
-			tail->next = NULL;
-			delete timer;
-			return;
+			it->user_data->timer = nullptr;
 		}
 
-		timer->prev->next = timer->next;
-		timer->next->prev = timer->prev;
-		delete timer;
+		m_timers.erase(it);
+
+
 	}
 
 	void tick()
 	{
-		if(!head)
-			return;
-		LOG_INFO("%s","timer tick");
-		Log::get_instance()->flush();
-		time_t cur = time(NULL);
-		util_timer* tmp = head;
-		while(tmp)
+		if(m_timers.empty())
 		{
-			if(cur<tmp->expire)
+			return;
+		}
+		LOG_INFO("%s","timer tick");
+
+		const auto now = util_timer::Clock::now();
+
+		while(!m_timers.empty())
+		{
+			auto& timer = m_timers.front();
+
+			if(timer.expire > now)
 			{
 				break;
 			}
-			tmp->cb_func(tmp->user_data);
-			head = tmp->next;
-			if(head)
+
+			client_data* user_data = timer.user_data;
+			auto cb_func = timer.cb_func;
+
+			if(user_data && user_data->timer == &timer)
 			{
-				head->prev = NULL;
+				user_data->timer = nullptr;
 			}
-			delete tmp;
-			tmp = head;
+
+			if(cb_func)
+			{
+				cb_func(user_data);
+			}
+
+			m_timers.pop_front();
 		}
 	}
 
 private:
-	void add_timer(util_timer* timer,util_timer* lst_head)
+
+	using TimerList = std::list<util_timer>;
+	TimerList::iterator find_timer(util_timer* timer)
 	{
-		util_timer* prev = lst_head;
-		util_timer* tmp = prev->next;
-		while(tmp)
-		{
-			if(timer->expire < tmp->expire)
-			{
-				prev->next = timer;
-				timer->next = tmp;
-				tmp->prev = timer;
-				timer->prev = prev;
-			}
-			prev = tmp;
-			tmp = tmp->next;
-		}
-
-		if(!tmp)
-		{
-			prev->next = timer;
-			timer->prev = prev;
-			timer->next = NULL;
-			tail = timer;
-		}
+		return std::find_if(m_timers.begin(), m_timers.end(), 
+				[timer](util_timer& current)
+				{
+					return &current == timer;
+				});
 	}
 
+
 private:
-	util_timer* head;
-	util_timer* tail;
+	std::list<util_timer> m_timers;
 };
 
 #endif
