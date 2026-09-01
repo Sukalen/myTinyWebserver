@@ -24,8 +24,8 @@
 #define TIMESLOT 5
 #define TIMESLOT_TIMES 12
 
-#define ASYNLOG
-//#define SYNLOG
+//#define ASYNLOG
+#define SYNLOG
 
 
 #define listenfdET
@@ -300,6 +300,7 @@ int main(int argc, char** argv)
                         LOG_ERROR("%s:errno is:%d", "accept error", errno);
                         break;
                     }
+
                 	if (http_conn::m_user_count.load(std::memory_order_relaxed) >= MAX_FD)
                     {
                         show_error(connfd, "Internal server busy");

@@ -115,22 +115,10 @@ void http_conn::init()
 	m_mysql = nullptr;
 
 	m_read_idx = 0;
-	m_checked_idx = 0;
-	m_start_line = 0;
 
 	m_write_idx = 0;
 
-	m_check_state = CHECK_STATE_REQUESTLINE;
-	m_method = GET;
-
-	m_url = nullptr;
-	m_version = nullptr;
-	m_host = nullptr;
-	m_string = nullptr;
-
-	m_content_length = 0;
-	m_linger = false;
-	m_cgi = 0;
+	m_request.reset();
 
 	m_file_address = nullptr;
 
@@ -210,12 +198,12 @@ void http_conn::initmysql_result(connection_pool* connpool)
 }
 bool http_conn::parse_user_form(std::string& username, std::string& password) const
 {
-	if(!m_string)
+	const std::string& body = m_request.body();
+
+	if(body.empty())
 	{
 		return false;
 	}
-
-	std::string body(m_string);
 
 	std::size_t amp = body.find('&');
 
@@ -243,205 +231,59 @@ bool http_conn::parse_user_form(std::string& username, std::string& password) co
 }
 
 
-http_conn::LINE_STATUS http_conn::parse_line()
-{
-	char temp;
-	for(;m_checked_idx<m_read_idx;++m_checked_idx)
-	{
-		temp = m_read_buf[m_checked_idx];
-		if('\r' == temp)
-		{
-			if( m_checked_idx + 1 == m_read_idx)
-			{
-				return LINE_OPEN;
-			}
-			else if('\n' == m_read_buf[m_checked_idx+1])
-			{
-				m_read_buf[m_checked_idx++] = '\0';
-				m_read_buf[m_checked_idx++] = '\0';
-				return LINE_OK;
-			}
-			return LINE_BAD;
-		}
-		else if('\n' == temp)
-		{
-			if(m_checked_idx > 1 && '\r' == m_read_buf[m_checked_idx-1])
-			{
-				m_read_buf[m_checked_idx-1] = '\0';
-				m_read_buf[m_checked_idx++] = '\0';
-				return LINE_OK;
-			}
-			return LINE_BAD;
-		}
-	}
-	return LINE_OPEN;
-}
 
-http_conn::HTTP_CODE http_conn::parse_request_line(char* text)
-{
-	m_url = strpbrk(text," \t");
-	if(!m_url)
-	{
-		return BAD_REQUEST;
-	}
-
-	*m_url++ = '\0';
-	char* method = text;
-	if(0 == strcasecmp(method,"GET"))
-	{
-		m_method = GET;
-	}
-	else if(0 == strcasecmp(method,"POST"))
-	{
-		m_method = POST;
-		m_cgi = 1;
-	}
-	else
-	{
-		return BAD_REQUEST;
-	}
-
-	m_url += strspn(m_url," \t");
-	m_version = strpbrk(m_url," \t");
-	if(!m_version)
-	{
-		return BAD_REQUEST;
-	}
-	*m_version++ = '\0';
-	m_version+=strspn(m_version," \t");
-	if(strcasecmp(m_version,"HTTP/1.1")!=0)
-	{
-		return BAD_REQUEST;
-	}
-
-	if(0 == strncasecmp(m_url,"http://",7))
-	{
-		m_url+=7;
-		m_url = strchr(m_url,'/');
-	}
-	else if(0 == strncasecmp(m_url,"https://",8))
-	{
-		m_url+=8;
-		m_url = strchr(m_url,'/');
-	}
-
-	if(!m_url || m_url[0]!='/')
-	{
-		return BAD_REQUEST;
-	}
-
-	if(1 == strlen(m_url))
-	{
-		strcat(m_url,"judge.html");
-	}
-	m_check_state = CHECK_STATE_HEADER;
-	return NO_REQUEST;
-}
-
-http_conn::HTTP_CODE http_conn::parse_headers(char* text)
-{
-	if('\0' == text[0])
-	{
-		if(m_content_length != 0)
-		{
-			m_check_state = CHECK_STATE_CONTENT;
-			return NO_REQUEST;
-		}
-		return GET_REQUEST;
-	}
-	else if( 0 == strncasecmp(text,"Connection:",11))
-	{
-		text+=11;
-		text+=strspn(text," \t");
-		if(0 == strcasecmp(text,"keep-alive"))
-		{
-			m_linger = true;
-		}
-	}
-	else if( 0 == strncasecmp(text,"Content-length:",15))
-	{
-		text+=15;
-		text+=strspn(text," \t");
-		m_content_length = atoi(text);
-	}
-	else if( 0 == strncasecmp(text,"Host:",5))
-	{
-		text+=5;
-		text+=strspn(text," \t");
-		m_host = text;
-	}
-	else
-	{
-		LOG_INFO("oop!unknow header:%s",text);
-		Log::get_instance()->flush();
-	}
-	return NO_REQUEST;
-}
-
-http_conn::HTTP_CODE http_conn::parse_content(char* text)
-{
-	if(m_read_idx >= m_content_length+m_checked_idx)
-	{
-		text[m_content_length] = '\0';
-		m_string = text;
-		return GET_REQUEST;
-	}
-	return NO_REQUEST;
-}
 
 http_conn::HTTP_CODE http_conn::do_request()
 {
-    if(!m_url)
+	const std::string& request_url = m_request.url();
+    if(request_url.empty())
     {
         return BAD_REQUEST;
     }
 
-    const char* p =
-        strrchr(m_url, '/');
+    std::size_t slash = request_url.find_last_of('/');
 
-    if(!p)
+    if(std::string::npos == slash)
     {
         return BAD_REQUEST;
     }
 
-    const char route = *(p + 1);
+    char route = '\0';
 
-    std::string target_url(m_url);
+	if(slash + 1 < request_url.size())
+	{
+		route = request_url[slash+1];
+	}
 
-    if(m_cgi == 1 &&
-       (route == '2' || route == '3'))
+    std::string target_url = request_url;
+
+    if(HttpRequest::Method::Post == m_request.method() &&
+       ('2' == route || '3' == route))
     {
         std::string username;
         std::string password;
 
-        if(!parse_user_form(
-                username,
-                password))
+        if(!parse_user_form(username, password))
         {
             return BAD_REQUEST;
         }
 
         
-        if(route == '2')
+        if('2' == route)
         {
             bool login_success = false;
 
             {
-                std::lock_guard<std::mutex>
-                    lock(m_mutex);
+                std::lock_guard<std::mutex> lock(m_mutex);
 
-                auto it =
-                    m_users.find(username);
+                auto it = m_users.find(username);
 
                 login_success =
-                    it != m_users.end() &&
-                    it->second == password;
+                    it != m_users.end() && it->second == password;
             }
 
             target_url =
-                login_success
-                ? "/welcome.html"
-                : "/logError.html";
+                login_success ? "/welcome.html" : "/logError.html";
         }
 
         
@@ -450,18 +292,15 @@ http_conn::HTTP_CODE http_conn::do_request()
             bool already_exists = false;
 
             {
-                std::lock_guard<std::mutex>
-                    lock(m_mutex);
+                std::lock_guard<std::mutex> lock(m_mutex);
 
                 already_exists =
-                    m_users.find(username)
-                    != m_users.end();
+                    m_users.find(username) != m_users.end();
             }
 
             if(already_exists)
             {
-                target_url =
-                    "/registerError.html";
+                target_url = "/registerError.html";
             }
             else
             {
@@ -473,24 +312,21 @@ http_conn::HTTP_CODE http_conn::do_request()
                     password +
                     "')";
 
-                int res =
-                    mysql_query(
+                int res = mysql_query(
                         m_mysql,
                         sql_insert.c_str());
 
-                if(res == 0)
+                if(0 == res)
                 {
                     {
-                        std::lock_guard<std::mutex>
-                            lock(m_mutex);
+                        std::lock_guard<std::mutex> lock(m_mutex);
 
                         m_users.emplace(
                             username,
                             password);
                     }
 
-                    target_url =
-                        "/log.html";
+                    target_url = "/log.html";
                 }
                 else
                 {
@@ -498,33 +334,31 @@ http_conn::HTTP_CODE http_conn::do_request()
                         "insert user failed:%s",
                         mysql_error(m_mysql));
 
-                    target_url =
-                        "/registerError.html";
+                    target_url = "/registerError.html";
                 }
             }
         }
     }
 
-    if(route == '0')
+    if('0' == route)
     {
         target_url = "/register.html";
     }
-    else if(route == '1')
+    else if('1' == route)
     {
         target_url = "/log.html";
     }
-    else if(route == '5')
+    else if('5' == route)
     {
         target_url = "/picture.html";
     }
-    else if(route == '6')
+    else if('6' == route)
     {
         target_url = "/video.html";
     }
 
     std::string full_path =
-        std::string(doc_root) +
-        target_url;
+        std::string(doc_root) + target_url;
 
     if(full_path.size() >= FILENAME_LEN)
     {
@@ -560,18 +394,17 @@ http_conn::HTTP_CODE http_conn::do_request()
         return BAD_REQUEST;
     }
 
-    if(m_file_stat.st_size == 0)
+    if(0 == m_file_stat.st_size)
     {
         m_file_address = nullptr;
         return FILE_REQUEST;
     }
 
-    int fd =
-        open(m_real_file, O_RDONLY);
+    int fd = open(m_real_file, O_RDONLY);
 
     if(fd < 0)
     {
-        if(errno == EACCES)
+        if(EACCES == errno)
         {
             return FORBIDDEN_REQUEST;
         }
@@ -579,8 +412,7 @@ http_conn::HTTP_CODE http_conn::do_request()
         return INTERNAL_ERROR;
     }
 
-    void* mapped =
-        mmap(
+    void* mapped = mmap(
             nullptr,
             m_file_stat.st_size,
             PROT_READ,
@@ -590,7 +422,7 @@ http_conn::HTTP_CODE http_conn::do_request()
 
     close(fd);
 
-    if(mapped == MAP_FAILED)
+    if(MAP_FAILED == mapped)
     {
         m_file_address = nullptr;
 
@@ -603,58 +435,29 @@ http_conn::HTTP_CODE http_conn::do_request()
         return INTERNAL_ERROR;
     }
 
-    m_file_address =
-        static_cast<char*>(mapped);
+    m_file_address = static_cast<char*>(mapped);
 
     return FILE_REQUEST;
 }
 
 http_conn::HTTP_CODE http_conn::process_read()
 {
-	LINE_STATUS line_status = LINE_OK;
-	HTTP_CODE ret = NO_REQUEST;
-	char* text = 0;
+	HttpRequest::ParseResult result = m_request.parse(
+			m_read_buf, static_cast<std::size_t>(m_read_idx));
+    
+	switch(result)
+    {
+        case HttpRequest::ParseResult::Incomplete:
+            return NO_REQUEST;
 
-	while((CHECK_STATE_CONTENT == m_check_state && LINE_OK == line_status) || (LINE_OK == (line_status=parse_line())))
-	{
-		text = get_line();
-		m_start_line = m_checked_idx;
-		LOG_INFO("%s",text);
-		Log::get_instance()->flush();
-		
-		switch(m_check_state)
-		{
-			case CHECK_STATE_REQUESTLINE:
-			{
-            	ret = parse_request_line(text);
-            	if (ret == BAD_REQUEST)
-                	return BAD_REQUEST;
-            	break;
-        	}
-        	case CHECK_STATE_HEADER:
-	        {
-    	        ret = parse_headers(text);
-        	    if (ret == BAD_REQUEST)
-	                return BAD_REQUEST;
-    	        else if (ret == GET_REQUEST)
-    	        {
-   		             return do_request();
-        	    }
-        	    break;
-      	  	}
- 	       	case CHECK_STATE_CONTENT:
-   		   	{
-        	    ret = parse_content(text);
-          	    if (ret == GET_REQUEST)
-            	    return do_request();
-            	line_status = LINE_OPEN;
-            	break;
-        	}
-     	   	default:
-            	return INTERNAL_ERROR;
-        }
-	}
-	return NO_REQUEST;
+        case HttpRequest::ParseResult::BadRequest:
+            return BAD_REQUEST;
+
+        case HttpRequest::ParseResult::Complete:
+            return do_request();
+    }
+
+    return INTERNAL_ERROR;
 }
 
 bool http_conn::read_once()
@@ -741,7 +544,7 @@ bool http_conn::write()
 			unmap();
 			modfd(m_epollfd,m_sockfd,EPOLLIN);
 
-			if(m_linger)
+			if(m_request.keep_alive())
 			{
 				init();
 				return true;
@@ -801,7 +604,7 @@ bool http_conn::add_content_type()
 }
 bool http_conn::add_linger()
 {
-    return add_response("Connection:%s\r\n", (m_linger == true) ? "keep-alive" : "close");
+    return add_response("Connection:%s\r\n", m_request.keep_alive() ? "keep-alive" : "close");
 }
 bool http_conn::add_blank_line()
 {
