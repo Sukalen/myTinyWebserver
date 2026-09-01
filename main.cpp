@@ -125,11 +125,11 @@ void close_client(client_data* user_data)
 int main(int argc, char** argv)
 {
 #ifdef ASYNLOG
-    Log::get_instance()->init("ServerLog", 2000, 800000, 8);
+    Log::get_instance()->init("ServerLog.log", 2000, 800000, 8);
 #endif
 
 #ifdef SYNLOG
-    Log::get_instance()->init("ServerLog", 2000, 800000, 0);
+    Log::get_instance()->init("ServerLog.log", 2000, 800000, 0);
 #endif
 
     if (argc <= 1)
