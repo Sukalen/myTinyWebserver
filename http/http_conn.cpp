@@ -29,8 +29,6 @@ const char* error_404_form = "The requested file was not found on this server.\n
 const char* error_500_title = "Internal Error";
 const char* error_500_form = "There was an unusual problem serving the requested file.\n";
 
-const char* doc_root = "/home/suu/myworkspace/myTinyWebserver/root";
-
 int setnonblocking(int fd)
 {
 	int old_option = fcntl(fd,F_GETFL);
@@ -87,26 +85,31 @@ std::atomic<int> http_conn::m_user_count{0};
 void http_conn::init()
 {
 	memset(m_read_buf,'\0',READ_BUFFER_SIZE);
-	memset(m_real_file,'\0',FILENAME_LEN);
 	
 	m_read_idx = 0;
 
 	m_request.reset();
 	m_response.reset();
-
-	m_file_address = nullptr;
+	
+	m_file.reset();
 
 	m_iv_count = 0;
 
 	m_bytes_to_send = 0;
 }
 
-void http_conn::init(int sockfd, const struct sockaddr_in& addr, AuthService* auth_service)
+void http_conn::init(
+		int sockfd,
+	   	const struct sockaddr_in& addr, 
+		AuthService* auth_service,
+	   	StaticFileHandler* static_file_handler)
 {
 	m_sockfd = sockfd;
 	m_address = addr;
 
 	m_auth_service = auth_service;
+
+	m_static_file_handler = static_file_handler;
 
 #ifdef connfdET
 	addfd(m_epollfd,sockfd,true,true);
@@ -125,7 +128,9 @@ void http_conn::close_conn(bool real_close)
 {
 	if(real_close && m_sockfd!=-1)
 	{
-		removefd(m_epollfd,m_sockfd);
+		m_file.reset();
+
+		removefd(m_epollfd, m_sockfd);
 
 		m_sockfd = -1;
 
@@ -234,88 +239,43 @@ http_conn::HTTP_CODE http_conn::do_request()
 		}
     }
 
+	if(!m_static_file_handler)
+	{
+		return INTERNAL_ERROR;
+	}
 
-    std::string full_path =
-        std::string(doc_root) + target_url;
+	StaticFileHandler::LoadResult
+		file_result = m_static_file_handler->load(target_url);
 
-    if(full_path.size() >= FILENAME_LEN)
-    {
-        return BAD_REQUEST;
-    }
+	switch(file_result.result)
+	{
+		case StaticFileHandler::Result::Success:
+		{
+			m_file = std::move(file_result.file);
+			return FILE_REQUEST;
+		}
+	    case StaticFileHandler::Result::NotFound:
+    	{
+        	return NO_RESOURCE;
+    	}
 
-    std::snprintf(
-        m_real_file,
-        FILENAME_LEN,
-        "%s",
-        full_path.c_str());
+    	case StaticFileHandler::Result::Forbidden:
+    	{
+        	return FORBIDDEN_REQUEST;
+    	}
 
-    if(stat(
-            m_real_file,
-            &m_file_stat) < 0)
-    {
-        LOG_ERROR(
-            "stat failed: file=%s errno=%d error=%s",
-            m_real_file,
-            errno,
-            strerror(errno));
+    	case StaticFileHandler::Result::BadRequest:
+    	{
+        	return BAD_REQUEST;
+    	}
 
-        return NO_RESOURCE;
-    }
+    	case StaticFileHandler::Result::InternalError:
+    	{
+        	return INTERNAL_ERROR;
+    	}
+	}
 
-    if(!(m_file_stat.st_mode & S_IROTH))
-    {
-        return FORBIDDEN_REQUEST;
-    }
-
-    if(S_ISDIR(m_file_stat.st_mode))
-    {
-        return BAD_REQUEST;
-    }
-
-    if(0 == m_file_stat.st_size)
-    {
-        m_file_address = nullptr;
-        return FILE_REQUEST;
-    }
-
-    int fd = open(m_real_file, O_RDONLY);
-
-    if(fd < 0)
-    {
-        if(EACCES == errno)
-        {
-            return FORBIDDEN_REQUEST;
-        }
-
-        return INTERNAL_ERROR;
-    }
-
-    void* mapped = mmap(
-            nullptr,
-            m_file_stat.st_size,
-            PROT_READ,
-            MAP_PRIVATE,
-            fd,
-            0);
-
-    close(fd);
-
-    if(MAP_FAILED == mapped)
-    {
-        m_file_address = nullptr;
-
-        LOG_ERROR(
-            "mmap failed: file=%s errno=%d error=%s",
-            m_real_file,
-            errno,
-            strerror(errno));
-
-        return INTERNAL_ERROR;
-    }
-
-    m_file_address = static_cast<char*>(mapped);
-
-    return FILE_REQUEST;
+	return INTERNAL_ERROR;
 }
 
 http_conn::HTTP_CODE http_conn::process_read()
@@ -394,13 +354,13 @@ bool http_conn::write()
 				return true;
 			}
 
-			unmap();
+			m_file.reset();
 			return false;
 		}
 
 		if( 0 == bytes_sent)
 		{
-			unmap();
+			m_file.reset();
 			return false;
 		}
 
@@ -408,7 +368,7 @@ bool http_conn::write()
 		m_bytes_to_send -= static_cast<std::size_t>(bytes_sent);
 	}
 
-	unmap();
+	m_file.reset();
 
 	modfd(m_epollfd, m_sockfd, EPOLLIN);
 
@@ -421,14 +381,6 @@ bool http_conn::write()
 	return false;
 }
 
-void http_conn::unmap()
-{
-	if(m_file_address)
-	{
-		munmap(m_file_address,m_file_stat.st_size);
-		m_file_address = NULL;
-	}
-}
 
 bool http_conn::process_write(HTTP_CODE ret)
 {
@@ -484,10 +436,9 @@ bool http_conn::process_write(HTTP_CODE ret)
         {
             m_response.set_status(200,ok_200_title);
 
-            if(m_file_stat.st_size > 0)
+            if(!m_file.empty())
             {
-                m_response.set_content_length(
-                    static_cast<std::size_t>(m_file_stat.st_size));
+                m_response.set_content_length(m_file.size());
             }
             else
             {
@@ -514,11 +465,11 @@ bool http_conn::process_write(HTTP_CODE ret)
     m_bytes_to_send = m_iv[0].iov_len;
 
     if(FILE_REQUEST == ret &&
-       m_file_stat.st_size > 0)
+       !m_file.empty())
     {
-        m_iv[1].iov_base = m_file_address;
+        m_iv[1].iov_base = m_file.data();
 
-        m_iv[1].iov_len = static_cast<std::size_t>(m_file_stat.st_size);
+        m_iv[1].iov_len = m_file.size();
 
         m_iv_count = 2;
 

@@ -19,6 +19,8 @@
 #include "./log/log.h"
 #include "./CGImysql/sql_connection_pool.h"
 #include "./service/auth_service.h"
+#include "./http/static_file_handler.h"
+
 
 #define MAX_FD 65536
 #define MAX_EVENT_NUMBER 10000
@@ -33,7 +35,7 @@
 
 //#define listenfdLT
 
-
+const std::string doc_root = "/home/suu/myworkspace/myTinyWebserver/root";
 
 const std::chrono::seconds CONNECTION_TIMEOUT{ TIMESLOT_TIMES * TIMESLOT};
 
@@ -168,6 +170,8 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
+	StaticFileHandler static_file_handler(doc_root);
+
     std::unique_ptr<threadpool<http_conn>> pool;
     try
     {
@@ -283,7 +287,7 @@ int main(int argc, char** argv)
                     LOG_ERROR("%s", "Internal server busy");
                     continue;
                 }
-                users[connfd].init(connfd, client_address, &auth_service);
+                users[connfd].init(connfd, client_address, &auth_service, &static_file_handler);
 
                 users_timer[connfd].address = client_address;
                 users_timer[connfd].sockfd = connfd;
@@ -318,7 +322,7 @@ int main(int argc, char** argv)
                         LOG_ERROR("%s", "Internal server busy");
                         break;
                     }
-                    users[connfd].init(connfd, client_address, &auth_service);
+                    users[connfd].init(connfd, client_address, &auth_service, &static_file_handler);
 
                     users_timer[connfd].address = client_address;
                     users_timer[connfd].sockfd = connfd;

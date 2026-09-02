@@ -26,12 +26,11 @@
 #include "http_response.h"
 #include "router.h"
 #include "../service/auth_service.h"
-
+#include "static_file_handler.h"
 
 class http_conn
 {
 public:
-	static const int FILENAME_LEN = 200;
 	static const int READ_BUFFER_SIZE = 2048;
 	enum HTTP_CODE
 	{
@@ -43,7 +42,8 @@ public:
 	~http_conn(){}
 
 public:
-	void init(int sockfd, const struct sockaddr_in& addr, AuthService* auth_service);
+	void init(int sockfd, const struct sockaddr_in& addr,
+		   	AuthService* auth_service, StaticFileHandler* static_file_handler);
 	void close_conn(bool real_close = true);
 	void process();
 	bool read_once();
@@ -60,8 +60,6 @@ private:
 
 	HTTP_CODE do_request();
 
-	void unmap();
-
 	bool parse_user_form(std::string& username, std::string& password) const;
 
 	void advance_iovecs(std::size_t bytes);
@@ -76,11 +74,7 @@ private:
 	
 	char m_read_buf[READ_BUFFER_SIZE];
 	int m_read_idx;
-	
-	char m_real_file[FILENAME_LEN];
 
-	char* m_file_address;
-	struct stat m_file_stat;
 	struct iovec m_iv[2];
 	int m_iv_count;
 
@@ -90,6 +84,10 @@ private:
 	HttpResponse m_response;
 	Router m_router;
 	AuthService* m_auth_service = nullptr;
+
+	StaticFileHandler* m_static_file_handler = nullptr;
+
+	StaticFileHandler::MappedFile m_file;
 
 };
 #endif
