@@ -232,30 +232,11 @@ bool http_conn::parse_user_form(std::string& username, std::string& password) co
 
 http_conn::HTTP_CODE http_conn::do_request()
 {
-	const std::string& request_url = m_request.url();
-    if(request_url.empty())
-    {
-        return BAD_REQUEST;
-    }
+	Router::RouteResult route = m_router.resolve(m_request);
+	std::string target_url = route.target;
 
-    std::size_t slash = request_url.find_last_of('/');
-
-    if(std::string::npos == slash)
-    {
-        return BAD_REQUEST;
-    }
-
-    char route = '\0';
-
-	if(slash + 1 < request_url.size())
-	{
-		route = request_url[slash+1];
-	}
-
-    std::string target_url = request_url;
-
-    if(HttpRequest::Method::Post == m_request.method() &&
-       ('2' == route || '3' == route))
+    if( Router::RouteType::Login == route.type ||
+		   	Router::RouteType::Register == route.type)
     {
         std::string username;
         std::string password;
@@ -266,7 +247,7 @@ http_conn::HTTP_CODE http_conn::do_request()
         }
 
         
-        if('2' == route)
+        if(Router::RouteType::Login == route.type)
         {
             bool login_success = false;
 
@@ -276,7 +257,8 @@ http_conn::HTTP_CODE http_conn::do_request()
                 auto it = m_users.find(username);
 
                 login_success =
-                    it != m_users.end() && it->second == password;
+                    it != m_users.end() &&
+				   	it->second == password;
             }
 
             target_url =
@@ -337,22 +319,6 @@ http_conn::HTTP_CODE http_conn::do_request()
         }
     }
 
-    if('0' == route)
-    {
-        target_url = "/register.html";
-    }
-    else if('1' == route)
-    {
-        target_url = "/log.html";
-    }
-    else if('5' == route)
-    {
-        target_url = "/picture.html";
-    }
-    else if('6' == route)
-    {
-        target_url = "/video.html";
-    }
 
     std::string full_path =
         std::string(doc_root) + target_url;

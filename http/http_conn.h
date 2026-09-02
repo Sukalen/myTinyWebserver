@@ -24,6 +24,7 @@
 #include "../CGImysql/sql_connection_pool.h"
 #include "http_request.h"
 #include "http_response.h"
+#include "router.h"
 
 
 class http_conn
@@ -90,5 +91,6 @@ private:
 	
 	HttpRequest m_request;
 	HttpResponse m_response;
+	Router m_router;
 };
 #endif
