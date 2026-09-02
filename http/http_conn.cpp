@@ -109,23 +109,20 @@ std::mutex http_conn::m_mutex;
 void http_conn::init()
 {
 	memset(m_read_buf,'\0',READ_BUFFER_SIZE);
-	memset(m_write_buf,'\0',WRITE_BUFFER_SIZE);
 	memset(m_real_file,'\0',FILENAME_LEN);
 	
 	m_mysql = nullptr;
 
 	m_read_idx = 0;
 
-	m_write_idx = 0;
-
 	m_request.reset();
+	m_response.reset();
 
 	m_file_address = nullptr;
 
 	m_iv_count = 0;
 
 	m_bytes_to_send = 0;
-	m_bytes_have_send = 0;
 }
 
 void http_conn::init(int sockfd, const struct sockaddr_in& addr)
@@ -503,58 +500,44 @@ bool http_conn::read_once()
 
 bool http_conn::write()
 {
-	int temp = 0;
-	if(0 == m_bytes_to_send)
+	while(m_bytes_to_send > 0)
 	{
-		modfd(m_epollfd,m_sockfd,EPOLLIN);
-		init();
-		return true;
-	}
+		ssize_t bytes_sent = writev(
+				m_sockfd, m_iv, m_iv_count);
 
-	while(1)
-	{
-		temp = writev(m_sockfd,m_iv,m_iv_count);
-		if(temp < 0)
+		if(bytes_sent < 0)
 		{
-			if(EAGAIN == errno)
+			if(EAGAIN == errno || EWOULDBLOCK == errno)
 			{
-				modfd(m_epollfd,m_sockfd,EPOLLOUT);
+				modfd(m_epollfd, m_sockfd, EPOLLOUT);
 				return true;
 			}
+
 			unmap();
 			return false;
 		}
 
-		m_bytes_have_send += temp;
-		m_bytes_to_send -= temp;
-		if(m_bytes_have_send >= m_iv[0].iov_len)
-		{
-			m_iv[0].iov_len = 0;
-			m_iv[1].iov_base = m_file_address + (m_bytes_have_send-m_write_idx);
-			m_iv[1].iov_len = m_bytes_to_send;
-		}
-		else
-		{
-			m_iv[0].iov_base = m_write_buf+m_bytes_have_send;
-			m_iv[0].iov_len = m_iv[0].iov_len - m_bytes_have_send;
-		}
-
-		if(m_bytes_to_send <= 0)
+		if( 0 == bytes_sent)
 		{
 			unmap();
-			modfd(m_epollfd,m_sockfd,EPOLLIN);
-
-			if(m_request.keep_alive())
-			{
-				init();
-				return true;
-			}
-			else
-			{
-				return false;
-			}
+			return false;
 		}
+
+		advance_iovecs(static_cast<std::size_t>(bytes_sent));
+		m_bytes_to_send -= static_cast<std::size_t>(bytes_sent);
 	}
+
+	unmap();
+
+	modfd(m_epollfd, m_sockfd, EPOLLIN);
+
+	if(m_request.keep_alive())
+	{
+		init();
+		return true;
+	}
+
+	return false;
 }
 
 void http_conn::unmap()
@@ -566,119 +549,112 @@ void http_conn::unmap()
 	}
 }
 
-bool http_conn::add_response(const char *format, ...)
-{
-    if (m_write_idx >= WRITE_BUFFER_SIZE)
-        return false;
-    va_list arg_list;
-    va_start(arg_list, format);
-    int len = vsnprintf(m_write_buf + m_write_idx, WRITE_BUFFER_SIZE - 1 - m_write_idx, format, arg_list);
-    if (len >= (WRITE_BUFFER_SIZE - 1 - m_write_idx))
-    {
-        va_end(arg_list);
-        return false;
-    }
-    m_write_idx += len;
-    va_end(arg_list);
-    LOG_INFO("request:%s", m_write_buf);
-    Log::get_instance()->flush();
-    return true;
-}
-bool http_conn::add_status_line(int status, const char *title)
-{
-    return add_response("%s %d %s\r\n", "HTTP/1.1", status, title);
-}
-bool http_conn::add_headers(int content_len)
-{
-    return add_content_length(content_len) &&
-    		add_linger() &&
-    		add_blank_line();
-}
-bool http_conn::add_content_length(int content_len)
-{
-    return add_response("Content-Length:%d\r\n", content_len);
-}
-bool http_conn::add_content_type()
-{
-    return add_response("Content-Type:%s\r\n", "text/html");
-}
-bool http_conn::add_linger()
-{
-    return add_response("Connection:%s\r\n", m_request.keep_alive() ? "keep-alive" : "close");
-}
-bool http_conn::add_blank_line()
-{
-    return add_response("%s", "\r\n");
-}
-bool http_conn::add_content(const char *content)
-{
-    return add_response("%s", content);
-}
 bool http_conn::process_write(HTTP_CODE ret)
 {
-    switch (ret)
+    m_response.reset();
+
+    m_response.set_keep_alive(m_request.keep_alive());
+
+    switch(ret)
     {
-    case INTERNAL_ERROR:
-    {
-        add_status_line(500, error_500_title);
-        add_headers(strlen(error_500_form));
-        if (!add_content(error_500_form))
-            return false;
-        break;
-    }
-    case BAD_REQUEST:
-    {
-	add_status_line(400,error_400_title);
-	add_headers(strlen(error_400_form));
-	if(!add_content(error_400_form))
-		return false;
-	break;
-    }
-    case NO_RESOURCE:
-    {
-        add_status_line(404, error_404_title);
-        add_headers(strlen(error_404_form));
-        if (!add_content(error_404_form))
-            return false;
-        break;
-    }
-    case FORBIDDEN_REQUEST:
-    {
-        add_status_line(403, error_403_title);
-        add_headers(strlen(error_403_form));
-        if (!add_content(error_403_form))
-            return false;
-        break;
-    }
-    case FILE_REQUEST:
-    {
-        add_status_line(200, ok_200_title);
-        if (m_file_stat.st_size != 0)
+        case INTERNAL_ERROR:
         {
-            add_headers(m_file_stat.st_size);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv[1].iov_base = m_file_address;
-            m_iv[1].iov_len = m_file_stat.st_size;
-            m_iv_count = 2;
-            m_bytes_to_send = m_write_idx + m_file_stat.st_size;
-            return true;
+            m_response.set_status(500, error_500_title);
+
+            m_response.set_content_type("text/plain; charset=utf-8");
+
+            m_response.set_body(error_500_form);
+            break;
         }
-        else
+
+        case BAD_REQUEST:
         {
-            const char *ok_string = "<html><body></body></html>";
-            add_headers(strlen(ok_string));
-            if (!add_content(ok_string))
-                return false;
+            m_response.set_status(400,error_400_title);
+
+            m_response.set_content_type("text/plain; charset=utf-8");
+
+            m_response.set_body(error_400_form);
+
+            break;
         }
+
+        case NO_RESOURCE:
+        {
+            m_response.set_status(404, error_404_title);
+
+            m_response.set_content_type("text/plain; charset=utf-8");
+
+            m_response.set_body(error_404_form);
+
+            break;
+        }
+
+        case FORBIDDEN_REQUEST:
+        {
+            m_response.set_status(403, error_403_title);
+
+            m_response.set_content_type("text/plain; charset=utf-8");
+
+            m_response.set_body(error_403_form);
+            break;
+        }
+
+        case FILE_REQUEST:
+        {
+            m_response.set_status(200,ok_200_title);
+
+            if(m_file_stat.st_size > 0)
+            {
+                m_response.set_content_length(
+                    static_cast<std::size_t>(m_file_stat.st_size));
+            }
+            else
+            {
+                m_response.set_content_type("text/html; charset=utf-8");
+
+                m_response.set_body("<html><body></body></html>");
+            }
+
+            break;
+        }
+
+        default:
+            return false;
     }
-    default:
-        return false;
-    }
-    m_iv[0].iov_base = m_write_buf;
-    m_iv[0].iov_len = m_write_idx;
+
+    m_response.build();
+
+    m_iv[0].iov_base = const_cast<char*>(m_response.header().data());
+
+    m_iv[0].iov_len = m_response.header().size();
+
     m_iv_count = 1;
-    m_bytes_to_send = m_write_idx;
+
+    m_bytes_to_send = m_iv[0].iov_len;
+
+    if(FILE_REQUEST == ret &&
+       m_file_stat.st_size > 0)
+    {
+        m_iv[1].iov_base = m_file_address;
+
+        m_iv[1].iov_len = static_cast<std::size_t>(m_file_stat.st_size);
+
+        m_iv_count = 2;
+
+        m_bytes_to_send += m_iv[1].iov_len;
+    }
+
+    else if(!m_response.body().empty())
+    {
+        m_iv[1].iov_base =const_cast<char*>(m_response.body().data());
+
+        m_iv[1].iov_len = m_response.body().size();
+
+        m_iv_count = 2;
+
+        m_bytes_to_send += m_iv[1].iov_len;
+    }
+
     return true;
 }
 
@@ -698,6 +674,35 @@ void http_conn::process()
 	}
 
 	modfd(m_epollfd,m_sockfd,EPOLLOUT);
+}
+
+void http_conn::advance_iovecs(std::size_t bytes)
+{
+	for(int i = 0; i < m_iv_count && bytes > 0; ++i)
+	{
+		if( 0 == m_iv[i].iov_len)
+		{
+			continue;
+		}
+
+		if(bytes >= m_iv[i].iov_len)
+		{
+			bytes -= m_iv[i].iov_len;
+
+			m_iv[i].iov_base = 
+				static_cast<char*>(m_iv[i].iov_base) + m_iv[i].iov_len;
+
+			m_iv[i].iov_len = 0;
+		}
+		else
+		{
+			m_iv[i].iov_base =
+				static_cast<char*>(m_iv[i].iov_base) + bytes;
+
+			m_iv[i].iov_len -= bytes;
+			bytes = 0;
+		}
+	}
 }
 
 
