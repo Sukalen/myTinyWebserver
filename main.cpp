@@ -18,6 +18,7 @@
 #include "./http/http_conn.h"
 #include "./log/log.h"
 #include "./CGImysql/sql_connection_pool.h"
+#include "./service/auth_service.h"
 
 #define MAX_FD 65536
 #define MAX_EVENT_NUMBER 10000
@@ -156,10 +157,21 @@ int main(int argc, char** argv)
         return 1;
     }
 
+	AuthService auth_service(connpool);
+
+	if(!auth_service.load_users())
+	{
+		LOG_ERROR("%s","load users failed");
+
+		Log::get_instance()->flush();
+
+		return 1;
+	}
+
     std::unique_ptr<threadpool<http_conn>> pool;
     try
     {
-        pool = std::make_unique<threadpool<http_conn>>(connpool);
+        pool = std::make_unique<threadpool<http_conn>>();
     }
     catch (const std::exception& e)
     {
@@ -170,7 +182,6 @@ int main(int argc, char** argv)
 
     std::vector<http_conn> users(MAX_FD);
     
-    users[0].initmysql_result(connpool);
 
     int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if(listenfd < 0)
@@ -272,7 +283,7 @@ int main(int argc, char** argv)
                     LOG_ERROR("%s", "Internal server busy");
                     continue;
                 }
-                users[connfd].init(connfd, client_address);
+                users[connfd].init(connfd, client_address, &auth_service);
 
                 users_timer[connfd].address = client_address;
                 users_timer[connfd].sockfd = connfd;
@@ -307,7 +318,7 @@ int main(int argc, char** argv)
                         LOG_ERROR("%s", "Internal server busy");
                         break;
                     }
-                    users[connfd].init(connfd, client_address);
+                    users[connfd].init(connfd, client_address, &auth_service);
 
                     users_timer[connfd].address = client_address;
                     users_timer[connfd].sockfd = connfd;

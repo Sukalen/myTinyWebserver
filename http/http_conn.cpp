@@ -1,4 +1,3 @@
-#include<mysql/mysql.h>
 #include<fstream>
 #include<string>
 #include<map>
@@ -82,37 +81,14 @@ void modfd(int epollfd,int fd,int ev)
 
 
 
-namespace
-{
-struct MysqlResultDeleter
-{
-	void operator()(MYSQL_RES* result) const noexcept
-	{
-		if(result)
-		{
-			mysql_free_result(result);
-		}
-	}
-};
-
-using MysqlResultPtr = std::unique_ptr<MYSQL_RES, MysqlResultDeleter>;
-}
-
-
-
-
 int http_conn::m_epollfd = -1;
 std::atomic<int> http_conn::m_user_count{0};
-std::map<std::string, std::string> http_conn::m_users;
-std::mutex http_conn::m_mutex;
 
 void http_conn::init()
 {
 	memset(m_read_buf,'\0',READ_BUFFER_SIZE);
 	memset(m_real_file,'\0',FILENAME_LEN);
 	
-	m_mysql = nullptr;
-
 	m_read_idx = 0;
 
 	m_request.reset();
@@ -125,10 +101,13 @@ void http_conn::init()
 	m_bytes_to_send = 0;
 }
 
-void http_conn::init(int sockfd, const struct sockaddr_in& addr)
+void http_conn::init(int sockfd, const struct sockaddr_in& addr, AuthService* auth_service)
 {
 	m_sockfd = sockfd;
 	m_address = addr;
+
+	m_auth_service = auth_service;
+
 #ifdef connfdET
 	addfd(m_epollfd,sockfd,true,true);
 #endif
@@ -154,45 +133,6 @@ void http_conn::close_conn(bool real_close)
 	}
 }
 
-void http_conn::initmysql_result(connection_pool* connpool)
-{
-	MYSQL* mysql = nullptr;
-
-	connectionRAII mysqlcon(&mysql, connpool);
-
-	if(mysql_query(mysql,"SELECT username,passwd FROM user") != 0)
-	{
-		LOG_ERROR("SELECT error: %s", mysql_error(mysql));
-		return;
-	}
-
-	MysqlResultPtr result(mysql_store_result(mysql));
-
-	if(!result)
-	{
-		LOG_ERROR("mysql_store_result failed: %s", mysql_error(mysql));
-		return;
-	}
-
-	std::map<std::string, std::string> loaded_users;
-
-	while(MYSQL_ROW row = mysql_fetch_row(result.get()))
-	{
-		if(!row[0] || !row[1])
-		{
-			continue;
-		}
-
-		loaded_users.emplace(row[0], row[1]);
-	}
-
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-
-		m_users = std::move(loaded_users);
-	}
-
-}
 bool http_conn::parse_user_form(std::string& username, std::string& password) const
 {
 	const std::string& body = m_request.body();
@@ -249,74 +189,49 @@ http_conn::HTTP_CODE http_conn::do_request()
         
         if(Router::RouteType::Login == route.type)
         {
-            bool login_success = false;
 
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
+			if(!m_auth_service)
+			{
+				return INTERNAL_ERROR;
+			}
 
-                auto it = m_users.find(username);
-
-                login_success =
-                    it != m_users.end() &&
-				   	it->second == password;
-            }
+            bool login_success = m_auth_service->login(
+					username,
+					password);
 
             target_url =
                 login_success ? "/welcome.html" : "/logError.html";
         }
-
-        
         else
         {
-            bool already_exists = false;
+			if(!m_auth_service)
+			{
+				return INTERNAL_ERROR;
+			}
 
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
+			AuthService::RegisterResult result =
+			   	m_auth_service->register_user(username, password);
 
-                already_exists =
-                    m_users.find(username) != m_users.end();
-            }
+			switch(result)
+			{
+				case AuthService::RegisterResult::Success:
+				{
+					target_url = "/log.html";
+					break;
+				}
 
-            if(already_exists)
-            {
-                target_url = "/registerError.html";
-            }
-            else
-            {
-                std::string sql_insert =
-                    "INSERT INTO user(username, passwd) "
-                    "VALUES('" +
-                    username +
-                    "', '" +
-                    password +
-                    "')";
+				case AuthService::RegisterResult::AlreadyExists:
+        		{
+            		target_url = "/registerError.html";
+            		break;
+       	 		}
 
-                int res = mysql_query(
-                        m_mysql,
-                        sql_insert.c_str());
-
-                if(0 == res)
-                {
-                    {
-                        std::lock_guard<std::mutex> lock(m_mutex);
-
-                        m_users.emplace(
-                            username,
-                            password);
-                    }
-
-                    target_url = "/log.html";
-                }
-                else
-                {
-                    LOG_ERROR(
-                        "insert user failed:%s",
-                        mysql_error(m_mysql));
-
-                    target_url = "/registerError.html";
-                }
-            }
-        }
+        		case AuthService::RegisterResult::DatabaseError:
+        		{
+            		return INTERNAL_ERROR;
+        		}
+        	}
+		}
     }
 
 

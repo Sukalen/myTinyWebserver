@@ -25,6 +25,7 @@
 #include "http_request.h"
 #include "http_response.h"
 #include "router.h"
+#include "../service/auth_service.h"
 
 
 class http_conn
@@ -42,7 +43,7 @@ public:
 	~http_conn(){}
 
 public:
-	void init(int sockfd,const struct sockaddr_in& addr);
+	void init(int sockfd, const struct sockaddr_in& addr, AuthService* auth_service);
 	void close_conn(bool real_close = true);
 	void process();
 	bool read_once();
@@ -51,7 +52,6 @@ public:
 	{
 		return &m_address;
 	}
-	void initmysql_result(connection_pool* connpool);
 
 private:
 	void init();
@@ -69,9 +69,6 @@ private:
 public:
 	static int m_epollfd;
 	static std::atomic<int> m_user_count;
-	static std::map<std::string,std::string> m_users;
-	static std::mutex m_mutex;
-	MYSQL* m_mysql;
 
 private:
 	int m_sockfd;
@@ -92,5 +89,7 @@ private:
 	HttpRequest m_request;
 	HttpResponse m_response;
 	Router m_router;
+	AuthService* m_auth_service = nullptr;
+
 };
 #endif

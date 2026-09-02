@@ -9,15 +9,12 @@
 #include<mutex>
 #include<condition_variable>
 
-#include "../CGImysql/sql_connection_pool.h"
-
-
 
 template<typename T>
 class threadpool
 {
 public:
-	threadpool(connection_pool* connpool,int thread_number = 8,int max_requests = 10000);
+	threadpool(int thread_number = 8,int max_requests = 10000);
 	~threadpool();
     
     threadpool(const threadpool&) = delete;
@@ -38,13 +35,12 @@ private:
 	std::condition_variable m_cond;
 
 	bool m_stop;
-	connection_pool* m_connpool;
 
 };
 
 template<typename T>
-threadpool<T>::threadpool(connection_pool* connpool,int thread_number,int max_requests):
-	m_thread_number(thread_number),m_max_requests(max_requests),m_stop(false),m_connpool(connpool)
+threadpool<T>::threadpool(int thread_number, int max_requests):
+	m_thread_number(thread_number), m_max_requests(max_requests), m_stop(false)
 {
 	if(thread_number <= 0 || max_requests <= 0)
 	{
@@ -151,9 +147,6 @@ void threadpool<T>::run()
             continue;
         }
         
-        connectionRAII mysqlcon(
-            &request->m_mysql,
-            m_connpool);
         request->process();
 	}
 }
