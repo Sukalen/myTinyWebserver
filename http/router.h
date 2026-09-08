@@ -12,7 +12,14 @@ public:
 	{
 		StaticFile,
 		Login,
-		Register
+		Register,
+
+        GameStart,
+        GameAction,
+        GameHint,
+        GameState,
+
+        InvalidApi
 	};
 
 	struct RouteResult

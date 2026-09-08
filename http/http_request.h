@@ -40,6 +40,18 @@ public:
         return m_url;
     }
 
+    const std::string& path() const noexcept
+    {
+        return m_path;
+    }
+
+    const std::string& query() const noexcept
+    {
+        return m_query;
+    }
+
+    bool query_param(const std::string& key, std::string& value) const;
+
     const std::string& version() const noexcept
     {
         return m_version;
@@ -103,7 +115,12 @@ private:
     std::size_t m_content_length = 0;
 
     std::string m_url;
+
+    std::string m_path;
+    std::string m_query;
+
     std::string m_version;
+
     std::string m_host;
     std::string m_body;
 

@@ -50,6 +50,9 @@ void HttpRequest::reset()
     m_content_length = 0;
 
     m_url.clear();
+    m_path.clear();
+    m_query.clear();
+
     m_version.clear();
     m_host.clear();
     m_body.clear();
@@ -159,9 +162,27 @@ bool HttpRequest::parse_request_line(char* text)
         return false;
     }
 
-    if("/" == m_url)
+    const std::size_t query_pos = m_url.find('?');
+
+    if(std::string::npos == query_pos)
     {
-        m_url = "/judge.html";
+        m_path = m_url;
+        m_query.clear();
+    }
+    else
+    {
+        m_path = m_url.substr(0, query_pos);
+        m_query = m_url.substr(query_pos + 1);
+    }
+
+    if(m_path.empty() || m_path.front() != '/')
+    {
+        return false;
+    }
+
+    if("/" == m_path)
+    {
+        m_path = "/judge.html";
     }
 
     return true;
@@ -306,5 +327,45 @@ HttpRequest::parse(char* buffer, std::size_t read_size)
     }
 }
 
+bool HttpRequest::query_param(const std::string& key, std::string& value) const
+{
+    if(key.empty())
+    {
+        return false;
+    }
 
+    std::size_t begin = 0;
+
+    while(begin <= m_query.size())
+    {
+        std::size_t end = m_query.find('&', begin);
+
+        if(end == std::string::npos)
+        {
+            end = m_query.size();
+        }
+
+        const std::size_t equal = m_query.find('=', begin);
+
+        if(equal != std::string::npos && equal < end)
+        {
+            const std::string current_key = m_query.substr(begin, equal - begin);
+
+            if(current_key == key)
+            {
+                value = m_query.substr(equal + 1, end - equal - 1);
+                return true;
+            }
+        }
+
+        if(end == m_query.size())
+        {
+            break;
+        }
+
+        begin = end + 1;
+    }
+
+    return false;
+}
 

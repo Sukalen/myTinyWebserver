@@ -3,13 +3,46 @@
 Router::RouteResult
 Router::resolve(const HttpRequest& request) const
 {
-    const std::string& url = request.url();
+    const std::string& path = request.path();
     RouteResult result;
 
     result.type = RouteType::StaticFile;
-    result.target = url;
+    result.target = path;
 
-    const char route_code = legacy_route_code(url);
+    /*
+     * 新游戏 API。
+     */
+    if(0 == path.rfind("/api/", 0))
+    {
+        if(path == "/api/game/start" && request.method() == HttpRequest::Method::Post)
+        {
+            result.type = RouteType::GameStart;
+            return result;
+        }
+
+        if(path == "/api/game/action" && request.method() == HttpRequest::Method::Post)
+        {
+            result.type = RouteType::GameAction;
+            return result;
+        }
+
+        if(path == "/api/game/hint" && request.method() == HttpRequest::Method::Post)
+        {
+            result.type = RouteType::GameHint;
+            return result;
+        }
+
+        if(path == "/api/game/state" && request.method() == HttpRequest::Method::Get)
+        {
+            result.type = RouteType::GameState;
+            return result;
+        }
+
+        result.type = RouteType::InvalidApi;
+        return result;
+    }
+
+    const char route_code = legacy_route_code(path);
 
 
     if(HttpRequest::Method::Post == request.method())
