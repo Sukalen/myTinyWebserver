@@ -27,14 +27,24 @@
 #include "router.h"
 #include "../service/auth_service.h"
 #include "static_file_handler.h"
+#include "game_api_handler.h"
 
 class http_conn
 {
 public:
 	static const int READ_BUFFER_SIZE = 2048;
+
 	enum HTTP_CODE
 	{
-		NO_REQUEST,GET_REQUEST,BAD_REQUEST,NO_RESOURCE,FORBIDDEN_REQUEST,FILE_REQUEST,INTERNAL_ERROR,CLOSED_CONNECTION
+    	NO_REQUEST,
+    	GET_REQUEST,
+    	BAD_REQUEST,
+    	NO_RESOURCE,
+    	FORBIDDEN_REQUEST,
+    	FILE_REQUEST,
+    	API_RESPONSE,
+    	INTERNAL_ERROR,
+    	CLOSED_CONNECTION
 	};
 
 public:
@@ -42,8 +52,12 @@ public:
 	~http_conn(){}
 
 public:
-	void init(int sockfd, const struct sockaddr_in& addr,
-		   	AuthService* auth_service, StaticFileHandler* static_file_handler);
+	void init(int sockfd,
+		   	const struct sockaddr_in& addr,
+		   	AuthService* auth_service, 
+			StaticFileHandler* static_file_handler,
+			GameApiHandler* game_api_handler);
+
 	void close_conn(bool real_close = true);
 	void process();
 	bool read_once();
@@ -88,6 +102,9 @@ private:
 	StaticFileHandler* m_static_file_handler = nullptr;
 
 	StaticFileHandler::MappedFile m_file;
+
+	GameApiHandler* m_game_api_handler = nullptr;
+	std::string m_api_body;
 
 };
 #endif

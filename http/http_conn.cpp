@@ -96,13 +96,16 @@ void http_conn::init()
 	m_iv_count = 0;
 
 	m_bytes_to_send = 0;
+
+	m_api_body.clear();
 }
 
 void http_conn::init(
 		int sockfd,
 	   	const struct sockaddr_in& addr, 
 		AuthService* auth_service,
-	   	StaticFileHandler* static_file_handler)
+	   	StaticFileHandler* static_file_handler,
+		GameApiHandler* game_api_handler)
 {
 	m_sockfd = sockfd;
 	m_address = addr;
@@ -110,6 +113,8 @@ void http_conn::init(
 	m_auth_service = auth_service;
 
 	m_static_file_handler = static_file_handler;
+
+	m_game_api_handler = game_api_handler;
 
 #ifdef connfdET
 	addfd(m_epollfd,sockfd,true,true);
@@ -179,6 +184,22 @@ http_conn::HTTP_CODE http_conn::do_request()
 {
 	Router::RouteResult route = m_router.resolve(m_request);
 	std::string target_url = route.target;
+
+	if( Router::RouteType::GameStart == route.type ||
+   		Router::RouteType::GameAction == route.type ||
+   		Router::RouteType::GameHint == route.type ||
+   		Router::RouteType::GameState == route.type ||
+   		Router::RouteType::InvalidApi == route.type)
+	{
+    	if(!m_game_api_handler)
+    	{
+        	return INTERNAL_ERROR;
+    	}
+
+    	m_api_body = m_game_api_handler->handle(m_request, route.type);
+
+    	return API_RESPONSE;
+	}
 
     if( Router::RouteType::Login == route.type ||
 		   	Router::RouteType::Register == route.type)
@@ -449,6 +470,14 @@ bool http_conn::process_write(HTTP_CODE ret)
 
             break;
         }
+
+		case API_RESPONSE:
+		{
+    		m_response.set_status(200, ok_200_title);
+    		m_response.set_content_type("application/json");
+    		m_response.set_body(m_api_body);
+    		break;
+		}
 
         default:
             return false;

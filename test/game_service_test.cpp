@@ -1,7 +1,9 @@
 #include <cassert>
 #include <iostream>
+#include <chrono>
+#include <thread>
 
-#include "game_service.h"
+#include "../service/game_service.h"
 
 int main()
 {
@@ -103,6 +105,48 @@ int main()
 
 
     assert(service.session_count() == 1);
+
+
+	{
+    game::GameService timeout_service(std::chrono::seconds(1));
+
+    auto start = timeout_service.start_game(5);
+
+    assert(start.success());
+    assert(timeout_service.session_count() == 1);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+    const std::size_t removed = timeout_service.cleanup_expired_sessions();
+
+    assert(removed == 1);
+    assert(timeout_service.session_count() == 0);
+
+    auto state = timeout_service.get_state(start.session_id);
+
+    assert(state.code == game::GameService::Code::SessionNotFound);
+	}
+
+	{
+    game::GameService timeout_service(std::chrono::seconds(1));
+
+    auto start = timeout_service.start_game(5);
+
+    assert(start.success());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+    auto state = timeout_service.get_state(start.session_id);
+
+    assert(state.success());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+    const std::size_t removed = timeout_service.cleanup_expired_sessions();
+
+    assert(removed == 0);
+    assert(timeout_service.session_count() == 1);
+	}
 
     std::cout << "GameService test passed\n";
 

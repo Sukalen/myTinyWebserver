@@ -20,7 +20,8 @@
 #include "./CGImysql/sql_connection_pool.h"
 #include "./service/auth_service.h"
 #include "./http/static_file_handler.h"
-
+#include "./service/game_service.h"
+#include "./http/game_api_handler.h"
 
 #define MAX_FD 65536
 #define MAX_EVENT_NUMBER 10000
@@ -172,6 +173,9 @@ int main(int argc, char** argv)
 
 	StaticFileHandler static_file_handler(doc_root);
 
+	game::GameService game_service;
+	GameApiHandler game_api_handler(&game_service);
+
     std::unique_ptr<threadpool<http_conn>> pool;
     try
     {
@@ -287,7 +291,7 @@ int main(int argc, char** argv)
                     LOG_ERROR("%s", "Internal server busy");
                     continue;
                 }
-                users[connfd].init(connfd, client_address, &auth_service, &static_file_handler);
+                users[connfd].init(connfd, client_address, &auth_service, &static_file_handler, &game_api_handler);
 
                 users_timer[connfd].address = client_address;
                 users_timer[connfd].sockfd = connfd;
@@ -322,7 +326,7 @@ int main(int argc, char** argv)
                         LOG_ERROR("%s", "Internal server busy");
                         break;
                     }
-                    users[connfd].init(connfd, client_address, &auth_service, &static_file_handler);
+                    users[connfd].init(connfd, client_address, &auth_service, &static_file_handler, &game_api_handler);
 
                     users_timer[connfd].address = client_address;
                     users_timer[connfd].sockfd = connfd;

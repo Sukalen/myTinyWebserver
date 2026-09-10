@@ -12,6 +12,15 @@
 namespace game
 {
 
+GameService::GameService(std::chrono::seconds session_timeout)
+    : m_session_timeout(session_timeout)
+{
+    if(m_session_timeout.count() <= 0)
+    {
+        throw std::invalid_argument("session timeout must be positive");
+    }
+}
+
 bool GameService::supported_size(int size) noexcept
 {
     return size >= 5 && size <= 8;
@@ -79,7 +88,7 @@ std::string GameService::generate_session_id()
 }
 
 std::shared_ptr<GameSession>
-GameService::find_session(const std::string& session_id) const
+GameService::find_session(const std::string& session_id)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -90,7 +99,9 @@ GameService::find_session(const std::string& session_id) const
         return nullptr;
     }
 
-    return it->second;
+    it->second.last_active = std::chrono::steady_clock::now();
+
+    return it->second.session;
 }
 
 GameService::StateResult
@@ -122,7 +133,7 @@ GameService::start_game(int size)
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            m_sessions.emplace(session_id, session);
+			m_sessions.emplace(session_id, SessionEntry{session, std::chrono::steady_clock::now()});
         }
 
         result.code = Code::Success;
@@ -228,7 +239,7 @@ GameService::hint(const std::string& session_id)
 
 
 GameService::StateResult
-GameService::get_state(const std::string& session_id) const
+GameService::get_state(const std::string& session_id)
 {
     StateResult result;
     result.session_id = session_id;
@@ -251,6 +262,35 @@ std::size_t GameService::session_count() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_sessions.size();
+}
+
+std::chrono::minutes GameService::session_timeout() noexcept
+{
+    return std::chrono::minutes(30);
+}
+
+std::size_t GameService::cleanup_expired_sessions()
+{
+    const auto now = std::chrono::steady_clock::now();
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    std::size_t removed = 0;
+
+    for(auto it = m_sessions.begin(); it != m_sessions.end();)
+    {
+        if(now - it->second.last_active >= m_session_timeout)
+        {
+            it = m_sessions.erase(it);
+            ++removed;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    return removed;
 }
 
 }
