@@ -128,19 +128,28 @@ void http_conn::init(
 
 	init();
 }
-	
+
 void http_conn::close_conn(bool real_close)
 {
-	if(real_close && m_sockfd!=-1)
-	{
-		m_file.reset();
+    if(!real_close)
+    {
+        return;
+    }
 
-		removefd(m_epollfd, m_sockfd);
+    std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
 
-		m_sockfd = -1;
+    if(m_sockfd == -1)
+    {
+        return;
+    }
 
-		m_user_count.fetch_sub(1, std::memory_order_relaxed);
-	}
+    if(m_in_worker)
+    {
+        m_pending_close = true;
+        return;
+    }
+
+    close_conn_locked();
 }
 
 bool http_conn::parse_user_form(std::string& username, std::string& password) const
@@ -525,16 +534,19 @@ void http_conn::process()
 	if(NO_REQUEST == read_ret)
 	{
 		modfd(m_epollfd,m_sockfd,EPOLLIN);
+		finish_processing();
 		return;
 	}
 
 	if(!process_write(read_ret))
 	{
 		close_conn();
+		finish_processing();
 		return;
 	}
 
 	modfd(m_epollfd,m_sockfd,EPOLLOUT);
+	finish_processing();
 }
 
 void http_conn::advance_iovecs(std::size_t bytes)
@@ -566,4 +578,49 @@ void http_conn::advance_iovecs(std::size_t bytes)
 	}
 }
 
+bool http_conn::try_start_processing()
+{
+    std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
 
+    if(m_sockfd == -1 || m_in_worker)
+    {
+        return false;
+    }
+
+    m_in_worker = true;
+    return true;
+}
+
+void http_conn::close_conn_locked()
+{
+    if(m_sockfd == -1)
+    {
+        return;
+    }
+
+    m_file.reset();
+
+    removefd(m_epollfd, m_sockfd);
+
+    m_sockfd = -1;
+
+    m_user_count.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void http_conn::finish_processing()
+{
+    std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
+
+    m_in_worker = false;
+
+    if(m_pending_close)
+    {
+        m_pending_close = false;
+        close_conn_locked();
+    }
+}
+
+void http_conn::cancel_processing()
+{
+    finish_processing();
+}

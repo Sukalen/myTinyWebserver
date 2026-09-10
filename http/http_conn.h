@@ -67,6 +67,9 @@ public:
 		return &m_address;
 	}
 
+	bool try_start_processing();
+	void cancel_processing();
+
 private:
 	void init();
 	HTTP_CODE process_read();
@@ -78,12 +81,15 @@ private:
 
 	void advance_iovecs(std::size_t bytes);
 
+	void finish_processing();
+	void close_conn_locked();
+
 public:
 	static int m_epollfd;
 	static std::atomic<int> m_user_count;
 
 private:
-	int m_sockfd;
+	int m_sockfd = -1;
 	struct sockaddr_in m_address;
 	
 	char m_read_buf[READ_BUFFER_SIZE];
@@ -105,6 +111,10 @@ private:
 
 	GameApiHandler* m_game_api_handler = nullptr;
 	std::string m_api_body;
+
+	std::mutex m_lifecycle_mutex;
+	bool m_in_worker = false;
+	bool m_pending_close = false;
 
 };
 #endif

@@ -39,7 +39,7 @@
 const std::string doc_root = "/home/suu/myworkspace/myTinyWebserver/root";
 
 const std::chrono::seconds CONNECTION_TIMEOUT{ TIMESLOT_TIMES * TIMESLOT};
-
+const std::chrono::seconds SESSION_CLEANUP_INTERVAL{60};
 
 extern int addfd(int epollfd,int fd,bool is_et,bool one_shot);
 extern int removefd(int epollfd,int fd);
@@ -259,6 +259,9 @@ int main(int argc, char** argv)
     std::vector<client_data> users_timer(MAX_FD);
 
     bool timeout = false;
+
+	auto last_session_cleanup = std::chrono::steady_clock::now();
+
     alarm(TIMESLOT);
 
     while (!stop_server)
@@ -384,7 +387,21 @@ int main(int argc, char** argv)
                     LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
                     Log::get_instance()->flush();
 
-                    pool->append(&users[sockfd]);
+                    if(!users[sockfd].try_start_processing())
+    				{
+        				LOG_WARN("connection %d is already being processed", sockfd);
+        				continue;
+    				}
+
+    				if(!pool->append(&users[sockfd]))
+    				{
+        				users[sockfd].cancel_processing();
+
+        				LOG_WARN("threadpool queue full, close fd %d", sockfd);
+
+        				close_client(&users_timer[sockfd]);
+        				continue;
+    				}
 
                     if (timer)
                     {
@@ -420,6 +437,19 @@ int main(int argc, char** argv)
         if (timeout)
         {
             timer_handler();
+			const auto now = std::chrono::steady_clock::now();
+
+    		if(now - last_session_cleanup >= SESSION_CLEANUP_INTERVAL)
+    		{
+        		const std::size_t removed = game_service.cleanup_expired_sessions();
+
+        		if(removed > 0)
+        		{
+            		LOG_INFO("cleaned %zu expired game sessions", removed);
+        		}
+
+        		last_session_cleanup = now;
+    		}
             timeout = false;
         }
     }
