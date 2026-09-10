@@ -4,7 +4,7 @@
 #include<mutex>
 #include<atomic>
 #include<memory>
-
+#include<cstdint>
 
 #include "http_conn.h"
 #include "../log/log.h"
@@ -18,6 +18,16 @@
 #define listenfdET
 //#define listenfdLT
 
+namespace
+{
+
+std::uint64_t make_epoll_token(int fd, std::uint32_t generation) noexcept
+{
+    return (static_cast<std::uint64_t>(generation) << 32) |
+           static_cast<std::uint32_t>(fd);
+}
+
+}
 
 const char* ok_200_title = "OK";
 const char* error_400_title = "Bad Request";
@@ -37,10 +47,11 @@ int setnonblocking(int fd)
 	return old_option;
 }
 
-void addfd(int epollfd, int fd, bool is_et, bool one_shot)
+void addfd(int epollfd, int fd, bool is_et, bool one_shot, std::uint32_t generation)
 {
 	struct epoll_event event;
-	event.data.fd = fd;
+	//event.data.fd = fd;
+	event.data.u64 = make_epoll_token(fd, generation);
 
 	event.events = EPOLLIN|EPOLLRDHUP;
 	if(is_et)
@@ -61,10 +72,11 @@ void removefd(int epollfd,int fd)
 	close(fd);
 }
 
-void modfd(int epollfd,int fd,int ev)
+void modfd(int epollfd,int fd,int ev, std::uint32_t generation)
 {
 	struct epoll_event event;
-	event.data.fd = fd;
+	//event.data.fd = fd;
+	event.data.u64 = make_epoll_token(fd, generation);
 
 #ifdef connfdET
 	event.events = ev|EPOLLONESHOT|EPOLLRDHUP|EPOLLET;
@@ -101,32 +113,42 @@ void http_conn::init()
 }
 
 void http_conn::init(
-		int sockfd,
-	   	const struct sockaddr_in& addr, 
-		AuthService* auth_service,
-	   	StaticFileHandler* static_file_handler,
-		GameApiHandler* game_api_handler)
+    int sockfd,
+    const struct sockaddr_in& addr,
+    AuthService* auth_service,
+    StaticFileHandler* static_file_handler,
+    GameApiHandler* game_api_handler)
 {
-	m_sockfd = sockfd;
-	m_address = addr;
+    std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
 
-	m_auth_service = auth_service;
+    ++m_generation;
 
-	m_static_file_handler = static_file_handler;
+    if(0 == m_generation)
+    {
+        ++m_generation;
+    }
 
-	m_game_api_handler = game_api_handler;
+    m_in_worker = false;
+    m_pending_close = false;
+
+    m_sockfd = sockfd;
+    m_address = addr;
+
+    m_auth_service = auth_service;
+    m_static_file_handler = static_file_handler;
+    m_game_api_handler = game_api_handler;
 
 #ifdef connfdET
-	addfd(m_epollfd,sockfd,true,true);
+    addfd(m_epollfd, sockfd, true, true, m_generation);
 #endif
 
 #ifdef connfdLT
-	addfd(m_epollfd,sockfd,false,true);
+    addfd(m_epollfd, sockfd, false, true, m_generation);
 #endif
 
-	m_user_count.fetch_add(1, std::memory_order_relaxed);
+    m_user_count.fetch_add(1, std::memory_order_relaxed);
 
-	init();
+    init();
 }
 
 void http_conn::close_conn(bool real_close)
@@ -380,7 +402,7 @@ bool http_conn::write()
 		{
 			if(EAGAIN == errno || EWOULDBLOCK == errno)
 			{
-				modfd(m_epollfd, m_sockfd, EPOLLOUT);
+				modfd(m_epollfd, m_sockfd, EPOLLOUT, m_generation);
 				return true;
 			}
 
@@ -400,7 +422,7 @@ bool http_conn::write()
 
 	m_file.reset();
 
-	modfd(m_epollfd, m_sockfd, EPOLLIN);
+	modfd(m_epollfd, m_sockfd, EPOLLIN, m_generation);
 
 	if(m_request.keep_alive())
 	{
@@ -530,23 +552,31 @@ bool http_conn::process_write(HTTP_CODE ret)
 
 void http_conn::process()
 {
-	HTTP_CODE read_ret = process_read();
-	if(NO_REQUEST == read_ret)
-	{
-		modfd(m_epollfd,m_sockfd,EPOLLIN);
-		finish_processing();
-		return;
-	}
+    try
+    {
+        HTTP_CODE read_ret = process_read();
 
-	if(!process_write(read_ret))
-	{
-		close_conn();
-		finish_processing();
-		return;
-	}
+        if(NO_REQUEST == read_ret)
+        {
+            modfd(m_epollfd, m_sockfd, EPOLLIN, m_generation);
+        }
+        else if(!process_write(read_ret))
+        {
+            close_conn();
+        }
+        else
+        {
+            modfd(m_epollfd, m_sockfd, EPOLLOUT, m_generation);
+        }
+    }
+    catch(...)
+    {
+        close_conn();
+        finish_processing();
+        throw;
+    }
 
-	modfd(m_epollfd,m_sockfd,EPOLLOUT);
-	finish_processing();
+    finish_processing();
 }
 
 void http_conn::advance_iovecs(std::size_t bytes)
@@ -623,4 +653,12 @@ void http_conn::finish_processing()
 void http_conn::cancel_processing()
 {
     finish_processing();
+}
+
+bool http_conn::matches_event(int sockfd, std::uint32_t generation)
+{
+    std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
+
+    return m_sockfd == sockfd &&
+           m_generation == generation;
 }

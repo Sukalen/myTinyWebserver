@@ -150,11 +150,11 @@ public:
 			if(user_data && user_data->timer == &timer)
 			{
 				user_data->timer = nullptr;
-			}
 
-			if(cb_func)
-			{
-				cb_func(user_data);
+				if(cb_func)
+				{
+					cb_func(user_data);
+				}
 			}
 
 			m_timers.pop_front();

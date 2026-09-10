@@ -147,7 +147,18 @@ void threadpool<T>::run()
             continue;
         }
         
-        request->process();
+        try
+		{
+    		request->process();
+		}
+		catch(const std::exception& e)
+		{
+    		fprintf(stderr, "threadpool task exception: %s\n", e.what());
+		}
+		catch(...)
+		{
+    		fprintf(stderr, "threadpool task unknown exception\n");
+		}
 	}
 }
 

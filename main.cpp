@@ -41,7 +41,7 @@ const std::string doc_root = "/home/suu/myworkspace/myTinyWebserver/root";
 const std::chrono::seconds CONNECTION_TIMEOUT{ TIMESLOT_TIMES * TIMESLOT};
 const std::chrono::seconds SESSION_CLEANUP_INTERVAL{60};
 
-extern int addfd(int epollfd,int fd,bool is_et,bool one_shot);
+extern void addfd(int epollfd,int fd,bool is_et,bool one_shot, std::uint32_t generation);
 extern int removefd(int epollfd,int fd);
 extern int setnonblocking(int fd);
 
@@ -233,11 +233,11 @@ int main(int argc, char** argv)
 	}
 
 #ifdef listenfdET
-    addfd(epollfd, listenfd, true, false);
+    addfd(epollfd, listenfd, true, false, 0);
 #endif
 
 #ifdef listenfdLT
-	addfd(epollfd,listenfd,false,false);
+	addfd(epollfd,listenfd,false,false, 0);
 #endif
 
     http_conn::m_epollfd = epollfd;
@@ -250,7 +250,7 @@ int main(int argc, char** argv)
 		exit(1);
 	}
     setnonblocking(pipefd[1]);
-    addfd(epollfd, pipefd[0], true, false);
+    addfd(epollfd, pipefd[0], true, false, 0);
 
     addsig(SIGALRM, sig_handler, false);
     addsig(SIGTERM, sig_handler, false);
@@ -275,7 +275,10 @@ int main(int argc, char** argv)
 
         for (int i = 0; i < number; i++)
         {
-            int sockfd = events[i].data.fd;
+            //int sockfd = events[i].data.fd;
+			const std::uint64_t token = events[i].data.u64;
+			const int sockfd = static_cast<int>(static_cast<std::uint32_t>(token));
+			const std::uint32_t event_generation = static_cast<std::uint32_t>(token >> 32);
 
             if (sockfd == listenfd)
             {
@@ -340,12 +343,6 @@ int main(int argc, char** argv)
                 continue;
 #endif
             }
-
-            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
-            {
-				close_client(&users_timer[sockfd]);
-            }
-
             else if ((sockfd == pipefd[0]) && (events[i].events & EPOLLIN))
             {
                 int sig;
@@ -378,61 +375,79 @@ int main(int argc, char** argv)
                     }
                 }
             }
+			else
+			{
+				if(sockfd < 0 || sockfd >= MAX_FD)
+    			{
+        			continue;
+    			}
 
-            else if (events[i].events & EPOLLIN)
-            {
-                util_timer* timer = users_timer[sockfd].timer;
-                if (users[sockfd].read_once())
-                {
-                    LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-                    Log::get_instance()->flush();
+				if(!users[sockfd].matches_event(sockfd, event_generation))
+    			{
+        			LOG_WARN("ignore stale epoll event fd=%d generation=%u", sockfd, event_generation);
+        			continue;
+    			}
+				
+				if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+            	{
+                	close_client(&users_timer[sockfd]);
+            	}
 
-                    if(!users[sockfd].try_start_processing())
-    				{
-        				LOG_WARN("connection %d is already being processed", sockfd);
-        				continue;
-    				}
+            	else if (events[i].events & EPOLLIN)
+            	{
+                	util_timer* timer = users_timer[sockfd].timer;
+                	if (users[sockfd].read_once())
+                	{
+                    	LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+                    	Log::get_instance()->flush();
 
-    				if(!pool->append(&users[sockfd]))
-    				{
-        				users[sockfd].cancel_processing();
+                    	if(!users[sockfd].try_start_processing())
+    					{
+        					LOG_WARN("connection %d is already being processed", sockfd);
+        					continue;
+    					}
 
-        				LOG_WARN("threadpool queue full, close fd %d", sockfd);
+    					if(!pool->append(&users[sockfd]))
+    					{
+        					users[sockfd].cancel_processing();
 
-        				close_client(&users_timer[sockfd]);
-        				continue;
-    				}
+        					LOG_WARN("threadpool queue full, close fd %d", sockfd);
 
-                    if (timer)
-                    {
-                        timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
-						LOG_INFO("%s","adjust timer once");
-                    }
-                }
-                else
-                {
-					close_client(&users_timer[sockfd]);
-                }
-            }
-            else if (events[i].events & EPOLLOUT)
-            {
-                util_timer* timer = users_timer[sockfd].timer;
-                if (users[sockfd].write())
-                {
-                    LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-                    Log::get_instance()->flush();
+        					close_client(&users_timer[sockfd]);
+        					continue;
+    					}
 
-                    if (timer)
-                    {
-                        timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
-						LOG_INFO("%s","adjust timer once");
-                    }
-                }
-                else
-                {
-					close_client(&users_timer[sockfd]);
-				} 
-            }
+                    	if (timer)
+                    	{
+                        	timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
+							LOG_INFO("%s","adjust timer once");
+                    	}
+                	}
+                	else
+                	{
+						close_client(&users_timer[sockfd]);
+                	}
+            	}
+            	else if (events[i].events & EPOLLOUT)
+            	{
+                	util_timer* timer = users_timer[sockfd].timer;
+                	if (users[sockfd].write())
+                	{
+                    	LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+                    	Log::get_instance()->flush();
+
+                    	if (timer)
+                    	{
+                        	timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
+							LOG_INFO("%s","adjust timer once");
+                    	}
+                	}
+                	else
+                	{
+						close_client(&users_timer[sockfd]);
+					} 
+            	}
+			}
         }
         if (timeout)
         {

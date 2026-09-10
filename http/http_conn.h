@@ -20,6 +20,8 @@
 #include<mutex>
 #include<string>
 #include<map>
+#include<cstdint>
+
 
 #include "../CGImysql/sql_connection_pool.h"
 #include "http_request.h"
@@ -70,6 +72,8 @@ public:
 	bool try_start_processing();
 	void cancel_processing();
 
+	bool matches_event(int sockfd, std::uint32_t generation);
+
 private:
 	void init();
 	HTTP_CODE process_read();
@@ -115,6 +119,7 @@ private:
 	std::mutex m_lifecycle_mutex;
 	bool m_in_worker = false;
 	bool m_pending_close = false;
+	std::uint32_t m_generation = 0;
 
 };
 #endif
