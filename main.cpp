@@ -13,6 +13,8 @@
 
 #include<chrono>
 
+#include<cstdint>
+
 #include "./threadpool/threadpool.h"
 #include "./timer/lst_timer.h"
 #include "./http/http_conn.h"
@@ -291,10 +293,10 @@ int main(int argc, char** argv)
                     LOG_ERROR("%s:errno is:%d", "accept error", errno);
                     continue;
                 }
-                if (http_conn::m_user_count.load(std::memory_order_relaxed) >= MAX_FD)
+                if (connfd >= MAX_FD || http_conn::m_user_count.load(std::memory_order_relaxed) >= MAX_FD)
                 {
                     show_error(connfd, "Internal server busy");
-                    LOG_ERROR("%s", "Internal server busy");
+                    LOG_ERROR("connection rejected, fd=%d", connfd);
                     continue;
                 }
                 users[connfd].init(connfd, client_address, &auth_service, &static_file_handler, &game_api_handler);
@@ -326,11 +328,11 @@ int main(int argc, char** argv)
                         break;
                     }
 
-                	if (http_conn::m_user_count.load(std::memory_order_relaxed) >= MAX_FD)
+                	if (connfd >= MAX_FD || http_conn::m_user_count.load(std::memory_order_relaxed) >= MAX_FD)
                     {
                         show_error(connfd, "Internal server busy");
-                        LOG_ERROR("%s", "Internal server busy");
-                        break;
+                        LOG_ERROR("connection rejected, fd=%d", connfd);
+                        continue;
                     }
                     users[connfd].init(connfd, client_address, &auth_service, &static_file_handler, &game_api_handler);
 
