@@ -45,9 +45,12 @@ sudo sysctl -w kernel.core_pattern=core
 ```
 
 
-# 新增
+# 重构服务器
 1.将自己拥有的指针优化为智能指针，减少手动内存分配和释放
 
 2.使用C++11标准库：将pthread改用为std::thread，pthread_mutex_t、pthread_cond_t改为std::mutex、std::condition_variable 
 
 3.拆分http_conn的职责，拆分为HttpRequest、HttpResponse、Router、AuthService和StaticFileHandler
+
+# 新增寻找小猫游戏业务逻辑
+1.提供游戏创建、标记、提示、状态查询及通过判定接口，并完成微信小程序端联调
