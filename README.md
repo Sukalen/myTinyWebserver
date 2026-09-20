@@ -1,7 +1,7 @@
 # myTinyWebserver
 1.使用多线程
 
-2.使用reactor模式
+2.使用同步io模拟proactor模式
 
 3.循环数组实现阻塞队列,线程安全的阻塞队列
 
