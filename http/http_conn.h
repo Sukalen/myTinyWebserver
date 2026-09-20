@@ -48,6 +48,20 @@ public:
     	INTERNAL_ERROR,
     	CLOSED_CONNECTION
 	};
+    
+    enum class IoEvent
+    {
+        Read,
+        Write
+    };
+
+private:
+    enum class NextAction
+    {
+        Read,
+        Write,
+        Close
+    };
 
 public:
 	http_conn(){}
@@ -62,14 +76,14 @@ public:
 
 	void close_conn(bool real_close = true);
 	void process();
-	bool read_once();
-	bool write();
+	//bool read_once();
+	//bool write();
 	struct sockaddr_in* get_address()
 	{
 		return &m_address;
 	}
 
-	bool try_start_processing();
+	bool try_start_processing(IoEvent event);
 	void cancel_processing();
 
 	bool matches_event(int sockfd, std::uint32_t generation);
@@ -85,8 +99,15 @@ private:
 
 	void advance_iovecs(std::size_t bytes);
 
-	void finish_processing();
+	void finish_processing(NextAction action);
 	void close_conn_locked();
+
+    bool read_once();
+
+    NextAction handle_read_event();
+
+    NextAction handle_write_event();
+
 
 public:
 	static int m_epollfd;
@@ -120,6 +141,8 @@ private:
 	bool m_in_worker = false;
 	bool m_pending_close = false;
 	std::uint32_t m_generation = 0;
+
+    IoEvent m_io_event = IoEvent::Read;
 
 };
 #endif

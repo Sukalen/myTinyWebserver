@@ -391,6 +391,7 @@ bool http_conn::read_once()
 
 }
 
+/*
 bool http_conn::write()
 {
 	while(m_bytes_to_send > 0)
@@ -432,7 +433,58 @@ bool http_conn::write()
 
 	return false;
 }
+*/
+http_conn::NextAction
+http_conn::handle_write_event()
+{
+    while(m_bytes_to_send > 0)
+    {
+        ssize_t bytes_sent =
+            writev(
+                m_sockfd,
+                m_iv,
+                m_iv_count);
 
+        if(bytes_sent < 0)
+        {
+            if(EAGAIN == errno ||
+               EWOULDBLOCK == errno)
+            {
+                return NextAction::Write;
+            }
+
+            m_file.reset();
+
+            return NextAction::Close;
+        }
+
+        if(0 == bytes_sent)
+        {
+            m_file.reset();
+
+            return NextAction::Close;
+        }
+
+        advance_iovecs(
+            static_cast<std::size_t>(
+                bytes_sent));
+
+        m_bytes_to_send -=
+            static_cast<std::size_t>(
+                bytes_sent);
+    }
+
+    m_file.reset();
+
+    if(m_request.keep_alive())
+    {
+        init();
+
+        return NextAction::Read;
+    }
+
+    return NextAction::Close;
+}
 
 bool http_conn::process_write(HTTP_CODE ret)
 {
@@ -552,31 +604,27 @@ bool http_conn::process_write(HTTP_CODE ret)
 
 void http_conn::process()
 {
+    NextAction action = NextAction::Close;
+
     try
     {
-        HTTP_CODE read_ret = process_read();
-
-        if(NO_REQUEST == read_ret)
+        if(IoEvent::Read == m_io_event)
         {
-            modfd(m_epollfd, m_sockfd, EPOLLIN, m_generation);
-        }
-        else if(!process_write(read_ret))
-        {
-            close_conn();
+            action = handle_read_event();
         }
         else
         {
-            modfd(m_epollfd, m_sockfd, EPOLLOUT, m_generation);
+            action = handle_write_event();
         }
     }
     catch(...)
     {
-        close_conn();
-        finish_processing();
+        finish_processing(NextAction::Close);
+
         throw;
     }
 
-    finish_processing();
+    finish_processing(action);
 }
 
 void http_conn::advance_iovecs(std::size_t bytes)
@@ -608,7 +656,7 @@ void http_conn::advance_iovecs(std::size_t bytes)
 	}
 }
 
-bool http_conn::try_start_processing()
+bool http_conn::try_start_processing(IoEvent event)
 {
     std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
 
@@ -617,7 +665,9 @@ bool http_conn::try_start_processing()
         return false;
     }
 
+    m_io_event = event;
     m_in_worker = true;
+
     return true;
 }
 
@@ -637,7 +687,46 @@ void http_conn::close_conn_locked()
     m_user_count.fetch_sub(1, std::memory_order_relaxed);
 }
 
-void http_conn::finish_processing()
+void http_conn::finish_processing(NextAction action)
+{
+    std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
+
+    m_in_worker = false;
+
+    if(m_pending_close ||
+       NextAction::Close == action)
+    {
+        m_pending_close = false;
+
+        close_conn_locked();
+
+        return;
+    }
+
+    if(m_sockfd == -1)
+    {
+        return;
+    }
+
+    if(NextAction::Read == action)
+    {
+        modfd(
+            m_epollfd,
+            m_sockfd,
+            EPOLLIN,
+            m_generation);
+
+        return;
+    }
+
+    modfd(
+        m_epollfd,
+        m_sockfd,
+        EPOLLOUT,
+        m_generation);
+}
+
+void http_conn::cancel_processing()
 {
     std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
 
@@ -650,15 +739,33 @@ void http_conn::finish_processing()
     }
 }
 
-void http_conn::cancel_processing()
-{
-    finish_processing();
-}
-
 bool http_conn::matches_event(int sockfd, std::uint32_t generation)
 {
     std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
 
     return m_sockfd == sockfd &&
            m_generation == generation;
+}
+
+http_conn::NextAction
+http_conn::handle_read_event()
+{
+    if(!read_once())
+    {
+        return NextAction::Close;
+    }
+
+    HTTP_CODE read_ret = process_read();
+
+    if(NO_REQUEST == read_ret)
+    {
+        return NextAction::Read;
+    }
+
+    if(!process_write(read_ret))
+    {
+        return NextAction::Close;
+    }
+
+    return NextAction::Write;
 }

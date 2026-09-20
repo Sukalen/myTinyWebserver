@@ -38,7 +38,7 @@
 
 //#define listenfdLT
 
-const std::string doc_root = "/home/suu/myworkspace/myTinyWebserver/root";
+const std::string doc_root = "/home/su/myTinyWebserver/root";
 
 const std::chrono::seconds CONNECTION_TIMEOUT{ TIMESLOT_TIMES * TIMESLOT};
 const std::chrono::seconds SESSION_CLEANUP_INTERVAL{60};
@@ -50,6 +50,7 @@ extern int setnonblocking(int fd);
 static int pipefd[2];
 static sort_timer_lst timer_lst;
 static int epollfd = 0;
+
 
 void sig_handler(int sig)
 {
@@ -397,57 +398,71 @@ int main(int argc, char** argv)
 
             	else if (events[i].events & EPOLLIN)
             	{
-                	util_timer* timer = users_timer[sockfd].timer;
-                	if (users[sockfd].read_once())
-                	{
-                    	LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-                    	Log::get_instance()->flush();
+                    util_timer* timer = users_timer[sockfd].timer;
 
-                    	if(!users[sockfd].try_start_processing())
-    					{
-        					LOG_WARN("connection %d is already being processed", sockfd);
-        					continue;
-    					}
+                    if(!users[sockfd].try_start_processing(http_conn::IoEvent::Read))
+                    {
+                        LOG_WARN(
+                            "connection %d is already "
+                            "being processed",
+                            sockfd);
 
-    					if(!pool->append(&users[sockfd]))
-    					{
-        					users[sockfd].cancel_processing();
+                        continue;
+                    }
 
-        					LOG_WARN("threadpool queue full, close fd %d", sockfd);
+                    if(!pool->append(&users[sockfd]))
+                    {
+                        users[sockfd].cancel_processing();
 
-        					close_client(&users_timer[sockfd]);
-        					continue;
-    					}
+                        LOG_WARN(
+                            "threadpool queue full, "
+                            "close fd %d",
+                            sockfd);
 
-                    	if (timer)
-                    	{
-                        	timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
-							LOG_INFO("%s","adjust timer once");
-                    	}
-                	}
-                	else
-                	{
-						close_client(&users_timer[sockfd]);
-                	}
+                        close_client(&users_timer[sockfd]);
+
+                        continue;
+                    }
+
+                    if(timer)
+                    {
+                        timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
+                    }
             	}
             	else if (events[i].events & EPOLLOUT)
             	{
-                	util_timer* timer = users_timer[sockfd].timer;
-                	if (users[sockfd].write())
-                	{
-                    	LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-                    	Log::get_instance()->flush();
+                    util_timer* timer = users_timer[sockfd].timer;
 
-                    	if (timer)
-                    	{
-                        	timer_lst.adjust_timer(timer, CONNECTION_TIMEOUT);
-							LOG_INFO("%s","adjust timer once");
-                    	}
-                	}
-                	else
-                	{
-						close_client(&users_timer[sockfd]);
-					} 
+                    if(!users[sockfd].try_start_processing(http_conn::IoEvent::Write))
+                    {
+                        LOG_WARN(
+                            "connection %d is already "
+                            "being processed",
+                            sockfd);
+
+                        continue;
+                    }
+
+                    if(!pool->append(&users[sockfd]))
+                    {
+                        users[sockfd].cancel_processing();
+
+                        LOG_WARN(
+                            "threadpool queue full, "
+                            "close fd %d",
+                            sockfd);
+
+                        close_client(&users_timer[sockfd]);
+
+                        continue;
+                    }
+
+                    if(timer)
+                    {
+                        timer_lst.adjust_timer(
+                            timer,
+                            CONNECTION_TIMEOUT);
+                    }
             	}
 			}
         }
